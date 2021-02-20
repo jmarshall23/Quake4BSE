@@ -475,7 +475,7 @@ public:
 
 				virtual void			DisplayDebugInfo( const struct renderEffect_s *parms, const struct viewDef_s *view, idBounds &bounds );
 				void					InitModel( idRenderModel *model );
-  				idRenderModel			*Render( idRenderModel *model, const struct renderEffect_s *owner, const struct viewDef_s *view );
+  				idRenderModel			*Render( idRenderModel *model, const struct renderEffect_s *owner, const viewDef_t* view );
 				const char				*GetDeclName( void );
 				rvSegment				*GetTrailSegment( int child ) { return( &mSegments[child] ); }
 				rvSegment				*GetTrailSegment( const idStr &name );

@@ -86,10 +86,8 @@ ID_INLINE void SIMD_INIT_LAST_JOINT( idJointMat* joints, int numJoints )
 typedef bool( *deferredEntityCallback_t )( renderEntity_t*, const renderView_s* );
 
 
-struct renderEntity_t
+typedef struct renderEntity_s
 {
-	renderEntity_t();
-
 	idRenderModel* 			hModel;				// this can only be null if callback is set
 
 	int						entityNum;
@@ -165,14 +163,9 @@ struct renderEntity_t
 	int						forceUpdate;			// force an update (NOTE: not a bool to keep this struct a multiple of 4 bytes)
 	int						timeGroup;
 	int						xrayIndex;
-// jmarshall
-	bool					skipSuppress;
-// jmarshall end
-};
 
-ID_INLINE renderEntity_t::renderEntity_t() {
-	skipSuppress = false;
-}
+} renderEntity_t;
+
 
 typedef struct renderLight_s
 {
@@ -486,7 +479,7 @@ public:
 // jscott: for handling of effects
 typedef struct renderEffect_s {
 
-	const rvDeclEffect* declEffect;
+	const class rvDeclEffect* declEffect;
 
 	unsigned short			suppressSurfaceInViewID;
 	unsigned short			allowSurfaceInViewID;

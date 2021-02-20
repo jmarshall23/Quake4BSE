@@ -54,7 +54,7 @@ private:
 public:
 			byte		mStatic;
 			byte		mFastLookUp;
-private:
+//private:
 			idVec3		mEnvOffset;
 			idVec3		mRate;
 };

@@ -93,7 +93,7 @@ struct sdModelInfo {
 };
 
 extern const char sdPoolAllocator_rvParticleParms[];
-class rvParticleParms : public sdPoolAllocator< rvParticleParms, sdPoolAllocator_rvParticleParms, 128 >
+class rvParticleParms //: public sdPoolAllocator< rvParticleParms, sdPoolAllocator_rvParticleParms, 128 >
 {
 	friend class rvParticle;
 	friend class rvLineParticle;

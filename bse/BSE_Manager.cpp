@@ -11,7 +11,7 @@
 idCVar bse_speeds("bse_speeds", "0", CVAR_INTEGER, "print bse frame statistics");
 idCVar bse_enabled("bse_enabled", "1", CVAR_BOOL, "set to false to disable all effects");
 idCVar bse_render("bse_render", "1", CVAR_BOOL, "disable effect rendering");
-idCVar bse_debug("bse_debug", "0", CVAR_BOOL, "display debug info about effect");
+idCVar bse_debug("bse_debug", "0", CVAR_INTEGER, "display debug info about effect");
 idCVar bse_showBounds("bse_showbounds", "0", CVAR_BOOL, "display debug bounding boxes effect");
 idCVar bse_physics("bse_physics", "1", CVAR_BOOL, "disable effect physics");
 idCVar bse_debris("bse_debris", "1", CVAR_BOOL, "disable effect debris");
@@ -257,7 +257,7 @@ bool rvBSEManagerLocal::PlayEffect(rvRenderEffectLocal* def, float time)
 
 	if(Filtered(effectName, EC_IGNORE))
 		return 0;
-	if (bse_debug.GetBool())
+	if (bse_debug.GetInteger())
 	{
 		common->Printf("Playing effect: %s at %g\n", effectName.c_str(), time);
 	}
@@ -279,7 +279,7 @@ void rvBSEManagerLocal::RestartEffect(rvRenderEffectLocal* def)
 
 	if (def && def->index >= 0 && def->effect)
 	{
-		if (bse_debug.GetBool())
+		if (bse_debug.GetInteger())
 		{
 			idStr effectName = def->parms.declEffect->GetName();
 			common->Printf("Restarting effect %s\n", effectName.c_str());
@@ -323,7 +323,7 @@ bool rvBSEManagerLocal::ServiceEffect(rvRenderEffectLocal* def, float time, bool
 	def->referenceBounds[1].z = v9[1][2];
 	if (bse_speeds.GetBool())
 		++rvBSEManagerLocal::mPerfCounters[0];
-	if (bse_debug.GetBool())
+	if (bse_debug.GetInteger())
 		v5->EvaluateCost();
 	
 	return 0;
@@ -338,7 +338,7 @@ void rvBSEManagerLocal::StopEffect(rvRenderEffectLocal* def)
 {	
 	if (def && def->index >= 0 && def->effect)
 	{
-		if (bse_debug.GetBool())
+		if (bse_debug.GetInteger())
 		{
 			idStr effectName = def->parms.declEffect->GetName();
 			common->Printf("Stopping effect %s\n", effectName.c_str());			
@@ -364,7 +364,7 @@ void rvBSEManagerLocal::FreeEffect(rvRenderEffectLocal* def)
 
 	if (def && def->index >= 0 && def->effect)
 	{
-		if (bse_debug.GetBool())
+		if (bse_debug.GetInteger())
 		{
 			idStr effectName = def->parms.declEffect->GetName();
 			common->Printf("Freeing effect %s\n", effectName.c_str());
