@@ -631,6 +631,7 @@ public:
 
 				bool				operator== ( const rvParticleTemplate& a ) const { return( Compare( a ) ); }
 				bool				operator!= ( const rvParticleTemplate& a ) const { return( !Compare( a ) ); }
+				rvParticleTemplate& operator=(const rvParticleTemplate& __that);
 
 				void				SetFlag( bool on, int flag ) { on ? mFlags |= flag : mFlags &= ~flag; }
 				bool				GetFlag( int flag ) const { return ( mFlags & flag ) != 0; }
