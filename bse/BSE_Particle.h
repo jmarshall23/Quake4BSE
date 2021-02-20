@@ -624,6 +624,7 @@ public:
 	friend		class				rvParticleTemplateWrapper;
 	friend		class				rvLinkedParticle;
 	friend		class				sdOrientedLinkedParticle;
+	friend      class rvSegmentTemplate;
 
 									rvParticleTemplate( void ) : mFlags(0) { }
 									~rvParticleTemplate( void ) {}
