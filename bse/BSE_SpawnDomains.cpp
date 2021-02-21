@@ -9,6 +9,56 @@
 #include "BSE.h"
 #include "BSE_SpawnDomains.h"
 
+TSpawnFunc rvParticleParms::spawnFunctions[SPF_COUNT] = {
+		SpawnNone1,
+		SpawnNone2,
+		SpawnNone3,
+		SpawnStub,
+		SpawnOne1,
+		SpawnOne2,
+		SpawnOne3,
+		SpawnStub,
+		SpawnPoint1,
+		SpawnPoint2,
+		SpawnPoint3,
+		SpawnStub,
+		SpawnLinear1,
+		SpawnLinear2,
+		SpawnLinear3,
+		SpawnStub,
+		SpawnBox1,
+		SpawnBox2,
+		SpawnBox3,
+		SpawnStub,
+		SpawnSurfaceBox1,
+		SpawnSurfaceBox2,
+		SpawnSurfaceBox3,
+		SpawnStub,
+		SpawnBox1,
+		SpawnSphere2,
+		SpawnSphere3,
+		SpawnStub,
+		SpawnSurfaceBox1,
+		SpawnSurfaceSphere2,
+		SpawnSurfaceSphere3,
+		SpawnStub,
+		SpawnBox1,
+		SpawnSphere2,
+		SpawnCylinder3,
+		SpawnStub,
+		SpawnSurfaceBox1,
+		SpawnSurfaceSphere2,
+		SpawnSurfaceCylinder3,
+		SpawnStub,
+		SpawnStub,
+		SpawnSpiral2,
+		SpawnSpiral3,
+		SpawnStub,
+		SpawnStub,
+		SpawnStub,
+		SpawnModel3
+};
+
 void SpawnGetNormal(idVec3* normal, idVec3* result, idVec3* centre)
 {
 	idVec3* v3; // esi
