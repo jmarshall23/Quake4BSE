@@ -1,8 +1,8 @@
 // BSE_SegmentTemplate.cpp
 //
 
-#pragma hdrstop
-#include "precompiled.h"
+
+
 
 #include "BSE_Envelope.h"
 #include "BSE_Particle.h"
@@ -13,7 +13,7 @@ void rvSegmentTemplate::CreateParticleTemplate(rvDeclEffect* effect, idParser* s
 	mParticleTemplate.Init();
 	mParticleTemplate.mType = particleType;
 	mParticleTemplate.SetParameterCounts();
-	mParticleTemplate.Parse(effect, src);	
+	mParticleTemplate.Parse(effect, src);
 }
 
 bool rvSegmentTemplate::GetSoundLooping()
@@ -27,9 +27,9 @@ bool rvSegmentTemplate::GetSoundLooping()
 void rvSegmentTemplate::EvaluateTrailSegment(rvDeclEffect* et) {
 	if (mParticleTemplate.mTrailInfo->mTrailType)
 	{
-// jmarshall - WindowName isn't defined and doesn't make sense here
-		// if (idStr::Cmp(v3->mTrailTypeName.data, (const char*)&WindowName))
-// jmarshall end
+		// jmarshall - WindowName isn't defined and doesn't make sense here
+				// if (idStr::Cmp(v3->mTrailTypeName.data, (const char*)&WindowName))
+		// jmarshall end
 		{
 			mTrailSegmentIndex = et->GetTrailSegmentIndex(mParticleTemplate.mTrailInfo->mTrailTypeName);
 		}
@@ -43,7 +43,7 @@ bool rvSegmentTemplate::GetSmoker()
 
 bool rvSegmentTemplate::DetailCull() const
 {
-// jmarshall - effect culling function. forcing everything to no cull
+	// jmarshall - effect culling function. forcing everything to no cull
 	return false; // 0.0 != mDetail && mDetail > bse_detailLevel.internalVar->floatValue;
 // jmarshall end
 }
@@ -159,6 +159,30 @@ void rvSegmentTemplate::Duplicate(const rvSegmentTemplate& copy)
 
 void rvSegmentTemplate::Init(rvDeclEffect* decl)
 {
+	mSoundShader = NULL;
+	mFlags = 0;
+	mSegType = 0;
+	mLocalStartTime.Zero();				// Start time of segment wrt effect
+	mLocalDuration.Zero();					// Min and max duration
+	mAttenuation.Zero();					// How effect fades off to the distance
+	mParticleCap = 0;
+	mScale = 0;
+	mDetail = 0;
+
+	// Emitter parms	
+	mCount.Zero();							// The count of particles from a spawner
+	mDensity.Zero();						// Sets count or rate based on volume, area or length
+	mTrailSegmentIndex = 0;
+
+	mNumEffects = 0;
+	for (int i = 0; i < BSE_NUM_SPAWNABLE; i++)
+		mEffects[i] = NULL;
+
+	mSoundShader = NULL;
+	mSoundVolume.Zero();					// Starting volume of sound in decibels
+	mFreqShift.Zero();						// Frequency shift of sound
+
+	mDecalAxis = 0;
 	mDeclEffect = decl;
 	mFlags = 1;
 	mSegType = 0;
@@ -176,7 +200,7 @@ void rvSegmentTemplate::Init(rvDeclEffect* decl)
 	mParticleTemplate.mMaterial = NULL;
 	mParticleTemplate.mType = 0.0;
 	mParticleTemplate.mModel = NULL;
-	mParticleTemplate.mEntityDefName = "";	
+	mParticleTemplate.mEntityDefName = "";
 	mParticleTemplate.mGravity.x = 1.0;
 	mParticleTemplate.mGravity.y = 1.0;
 	mParticleTemplate.mDuration.x = 3;
@@ -301,9 +325,9 @@ bool rvSegmentTemplate::Finish(rvDeclEffect* effect)
 
 
 void rvSegmentTemplate::operator=(const rvSegmentTemplate& copy)
-{	
+{
 	this->mDeclEffect = copy.mDeclEffect;
-	this->mSegmentName = copy.mSegmentName;	
+	this->mSegmentName = copy.mSegmentName;
 	this->mFlags = copy.mFlags;
 	this->mSegType = copy.mSegType;
 	this->mLocalStartTime = copy.mLocalStartTime;
@@ -328,6 +352,27 @@ void rvSegmentTemplate::operator=(const rvSegmentTemplate& copy)
 	this->mDecalAxis = copy.mDecalAxis;
 }
 
+void __thiscall rvSegmentTemplate::SetMaxDuration(rvDeclEffect* effect)
+{
+	rvSegmentTemplate* v2; // esi
+	rvDeclEffect* v3; // edi
+	float duration; // ST0C_4
+	float effecta; // [esp+14h] [ebp+4h]
+
+	v2 = this;
+	if (!(((unsigned int)this->mFlags >> 4) & 1))
+	{
+		v3 = effect;
+		duration = this->mLocalDuration.x + this->mLocalStartTime.x;
+		effect->SetMaxDuration(duration);
+		if (v2->mParticleTemplate.mType)
+		{
+			effecta = v2->mLocalDuration.x + v2->mLocalStartTime.x + v2->mParticleTemplate.mDuration.y;
+			v3->SetMaxDuration(effecta);
+		}
+	}
+}
+
 bool rvSegmentTemplate::Parse(rvDeclEffect* effect, int segmentType, idParser* lexer) {
 	idToken token;
 
@@ -343,6 +388,8 @@ bool rvSegmentTemplate::Parse(rvDeclEffect* effect, int segmentType, idParser* l
 		mSegmentName = va("unnamed%d", effect->GetNumSegmentTemplates());
 		lexer->UnreadToken(&token);
 	}
+
+	mSegType = segmentType;
 
 	if (lexer->ExpectTokenString("{") && lexer->ReadToken(&token))
 	{
@@ -430,10 +477,10 @@ bool rvSegmentTemplate::Parse(rvDeclEffect* effect, int segmentType, idParser* l
 			{
 				lexer->ReadToken(&token);
 				mSoundShader = (idSoundShader*)declManager->FindSound(token);
-// jmarshall: Doom 3's sound engine didn't expose gettimelength!
-				//float effecta = mSoundShader->(double)v11->GetTimeLength((idSoundShader*)v11) * 0.001;
+				// jmarshall: Doom 3's sound engine didn't expose gettimelength!
+								//float effecta = mSoundShader->(double)v11->GetTimeLength((idSoundShader*)v11) * 0.001;
 				float effecta = 1.0f;
-// jmarshall end
+				// jmarshall end
 				mLocalDuration.x = effecta;
 				mLocalDuration.y = effecta;
 			}
@@ -513,6 +560,8 @@ bool rvSegmentTemplate::Parse(rvDeclEffect* effect, int segmentType, idParser* l
 			{
 				common->Warning("^4BSE:^1 Invalid segment parameter '%s' (file: %s, line: %d", token.c_str(), lexer->GetFileName(), lexer->GetLineNum());
 			}
+
+			lexer->ReadToken(&token);
 		}
 	}
 }

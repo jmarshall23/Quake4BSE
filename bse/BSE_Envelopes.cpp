@@ -1,8 +1,8 @@
 // BSP_Envelopes.cpp
 //
 
-#pragma hdrstop
-#include "precompiled.h"
+
+
 
 #include "BSE_Envelope.h"
 
@@ -53,7 +53,7 @@ void rvEnvParms::Init(void)
 rvEnvParms::Compare
 ==========================
 */
-bool rvEnvParms::Compare(const rvEnvParms & comp) const
+bool rvEnvParms::Compare(const rvEnvParms& comp) const
 {
 	return this->mTable == comp.mTable
 		&& this->mIsCount == comp.mIsCount

@@ -46,7 +46,7 @@ public:
 			void		Finalize( void );
 			void		ClearFast( void ) { mFastLookUp = false; }
 
-private:
+public:
 			bool		Compare( const rvEnvParms &comp ) const;
 
 	const	idDeclTable	*mTable;
@@ -76,7 +76,7 @@ public:
 			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
 			void		Transform( const idVec3 normal ) {}
 			void		Rotate( const rvAngles &angles );
-private:
+public:
 	const	idDeclTable	*mTable;
 			float		mEnvOffset;
 
@@ -102,7 +102,7 @@ public:
 			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
 			void		Transform( const idVec3 normal ) {}
 			void		Rotate( const rvAngles &angles );
-private:
+public:
 	const	idDeclTable	*mTable;
 			idVec2		mEnvOffset;
 
@@ -129,7 +129,7 @@ public:
 			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
 			void		Transform( const idVec3 normal ) { mStart *= normal.ToMat3(); mEnd *= normal.ToMat3(); }
 			void		Rotate( const rvAngles &angles );
-private:
+public:
 	const	idDeclTable	*mTable;
 			idVec3		mEnvOffset;
 
@@ -157,7 +157,7 @@ public:
 			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
 			void		Transform( const idVec3 normal ) {}
 			void		Rotate( const rvAngles &angles );
-private:
+public:
 			float		mStart;
 			float		mEnd;
 };
@@ -180,7 +180,7 @@ public:
 			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
 			void		Transform( const idVec3 normal ) {}
 			void		Rotate( const rvAngles &angles );
-private:
+public:
 			idVec2		mStart;
 			idVec2		mEnd;
 };
@@ -207,7 +207,7 @@ public:
 			void		Transform( const idMat3 &m ) { mStart *= m; mEnd *= m; }
 			void		Transform( const idVec3 normal ) { idMat3 const m = normal.ToMat3(); mStart *= m; mEnd *= m; }
 			void		Rotate( const rvAngles &angles );
-private:
+public:
 			idVec3		mStart;
 			idVec3		mEnd;
 };

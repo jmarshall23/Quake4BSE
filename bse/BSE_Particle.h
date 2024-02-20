@@ -62,8 +62,6 @@ class rvDeclEffect;
 class rvSegment;
 class rvSegmentTemplate;
 
-struct srfTriangles_t;
-
 #define PTFLAG_STATIONARY			BIT( 0 )
 #define PTFLAG_LOCKED				BIT( 1 )
 #define PTFLAG_HAS_OFFSET			BIT( 2 )
@@ -111,6 +109,10 @@ public:
 				int			GetAdditive( void ) const { return( ( mFlags & PTFLAG_ADDITIVE ) ); }
 				int			GetTiled( void ) const { return( ( mFlags & PTFLAG_TILED ) ); }
 				int			GetPersist( void ) const { return( ( mFlags & PTFLAG_PERSIST ) ); }
+
+				int			GetFlags(void) {
+					return mFlags;
+				}
 
 				void			SetStationary( bool stopped ) { SetFlag( stopped, PTFLAG_STATIONARY ); }
 				void			SetLocked( bool locked ) { SetFlag( locked, PTFLAG_LOCKED ); }
@@ -214,7 +216,7 @@ public:
 				float			UpdateViewDist( const idVec3 &eyePos ) { return (mPosition - eyePos).LengthSqr(); }
 //REMOVE		unsigned int				GetSortKey( void ) { return *((int *)(&mSqrViewDist)); }
 //REMOVE	const idVec3&				GetPosition() const { return mPosition; }
-protected:
+public:
 				// Can be altered in UpdateParticles
 	class		rvParticle		*mNext;
 				float			mMotionStartTime;						// World start time for motion calcs - reset on a bounce
@@ -261,9 +263,6 @@ class rvSpriteParticle : public rvParticle
 public:
 	friend		class			rvParticleTemplate;
 
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
-
 	virtual		void			EvaluateSize( rvEnvParms *size, const float time, float oneOverDuration, float *dest ) {
 		size->Evaluate( mSizeEnv, time, oneOverDuration, dest );
 	}
@@ -298,9 +297,6 @@ class rvLineParticle : public rvParticle
 {
 public:
 	friend		class			rvParticleTemplate;
-
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
 
 	virtual		void			EvaluateSize( rvEnvParms *size, const float time, float oneOverDuration, float *dest ) {// { mSizeEnv.Evaluate( time, dest ); }
 		size->Evaluate( mSizeEnv, time, oneOverDuration, dest );
@@ -345,9 +341,6 @@ class rvOrientedParticle : public rvSpriteParticle
 public:
 	friend		class			rvParticleTemplate;
 
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
-
 	virtual		void			EvaluateSize( rvEnvParms *size, const float time, float oneOverDuration, float *dest ) {// { mSizeEnv.Evaluate( time, dest ); }
 		size->Evaluate( mSizeEnv, time, oneOverDuration, dest );
 	}
@@ -386,9 +379,6 @@ public:
 				void			RenderLineSegment( const rvBSE *effect, struct SElecWork *work, idVec3 start, float startFraction );
 				void			ApplyShape( const rvBSE *effect, struct SElecWork *work, idVec3 start, idVec3 end, int count, float startFraction, float endFraction );
 
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
-
 	virtual		int				Update( rvParticleTemplate *pt, float time );
 	virtual		bool			Render( const rvBSE *effect, rvParticleTemplate *pt, const idMat3 &view, srfTriangles_t *tri, float time, float override = 1.0f );
 
@@ -413,9 +403,6 @@ class rvDecalParticle : public rvParticle //rvSpriteParticle
 {
 public:
 	friend		class			rvParticleTemplate;
-
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
 
 	virtual		void			EvaluateSize( rvEnvParms *size, const float time, float oneOverDuration, float *dest ) {}
 	virtual		void			EvaluateRotation( rvEnvParms *rotation, const float time, float oneOverDuration, float *dest ) {
@@ -443,9 +430,6 @@ class rvModelParticle : public rvParticle
 {
 public:
 	friend		class			rvParticleTemplate;
-
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
 
 	virtual		void			EvaluateSize( rvEnvParms *size, const float time, float oneOverDuration, float *dest ) {// { mSizeEnv.Evaluate( time, dest ); }
 		size->Evaluate( mSizeEnv, time, oneOverDuration, dest );
@@ -485,9 +469,6 @@ public:
 								rvLightParticle( void ) { mLightDefHandle = -1; }
 								~rvLightParticle( void ) { Destroy(); }
 
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
-
 	virtual		void			EvaluateSize( rvEnvParms *size, const float time, float oneOverDuration, float *dest ) {// { mSizeEnv.Evaluate( time, dest ); }
 		size->Evaluate( mSizeEnv, time, oneOverDuration, dest );
 	}
@@ -521,9 +502,6 @@ class rvLinkedParticle : public rvParticle
 {
 public:
 	friend		class			rvParticleTemplate;
-
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
 
 	virtual		void			EvaluateSize( rvEnvParms *size, const float time, float oneOverDuration, float *dest ) {// { mSizeEnv.Evaluate( time, dest ); }
 		size->Evaluate( mSizeEnv, time, oneOverDuration, dest );
@@ -560,9 +538,6 @@ class rvDebrisParticle : public rvParticle
 {
 public:
 	friend		class			rvParticleTemplate;
-
-	virtual		rvParticle		*GetArrayEntry( int i ) const;
-	virtual		int				GetArrayIndex( rvParticle *p ) const;
 
 	virtual		void			EvaluateRotation( rvEnvParms *rotation, const float time, float oneOverDuration, float *dest ) {// { mRotationEnv.Evaluate( time, dest ); }
 		rotation->Evaluate( mRotationEnv, time, oneOverDuration, dest );
@@ -633,6 +608,7 @@ public:
 				bool				operator!= ( const rvParticleTemplate& a ) const { return( !Compare( a ) ); }
 				rvParticleTemplate& operator=(const rvParticleTemplate& __that);
 
+				int					GetFlags(void) { return mFlags; }
 				void				SetFlag( bool on, int flag ) { on ? mFlags |= flag : mFlags &= ~flag; }
 				bool				GetFlag( int flag ) const { return ( mFlags & flag ) != 0; }
 				bool				GetParsed( void ) const { return( !!( mFlags & PTFLAG_PARSED ) ); }
@@ -734,7 +710,7 @@ public:
 				void				Duplicate( rvParticleTemplate const &copy );
 private:
 			bool					Compare( const rvParticleTemplate& a ) const;
-			void					FixupParms( rvParticleParms &parms );
+			void					FixupParms( rvParticleParms *parms );
 			void					AllocTrail( void );
 			void					AllocElectricityInfo( void );
 
