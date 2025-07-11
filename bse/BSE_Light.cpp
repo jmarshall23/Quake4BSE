@@ -1,200 +1,131 @@
-// BSP_Light.cpp
-//
+﻿/*
+===========================================================================
 
-#pragma hdrstop
-#include "precompiled.h"
+QUAKE 4 BSE CODE RECREATION EFFORT - (c) 2025 by Justin Marshall(IceColdDuke).
 
-#include "BSE_Envelope.h"
-#include "BSE_Particle.h"
-#include "BSE.h"
-#include "BSE_Particle.h"
+QUAKE 4 BSE CODE RECREATION EFFORT is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-/*
-=====================
-rvLightParticle::Destroy
-=====================
+QUAKE 4 BSE CODE RECREATION EFFORT is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with QUAKE 4 BSE CODE RECREATION EFFORT.  If not, see <http://www.gnu.org/licenses/>.
+
+In addition, the QUAKE 4 BSE CODE RECREATION EFFORT is also subject to certain additional terms. You should have received a copy of these additional terms immediately following the terms and conditions of the GNU General Public License which accompanied the Doom 3 BFG Edition Source Code.  If not, please request a copy in writing from id Software at the address below.
+
+If you have questions concerning this license or the applicable additional terms, you may contact in writing id Software LLC, c/o ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
+
+===========================================================================
 */
-bool rvLightParticle::Destroy(void)
-{
-	if (mLightDefHandle != -1)
-	{		
-		common->RW()->FreeLightDef(mLightDefHandle);
-		mLightDefHandle = -1;
-	}
-	return 1;
+
+#include "bse.h"
+
+// ───────── helpers ───────────────────────────────────────────────────────────
+void rvLightParticle::ClampRadius() {
+    mLight.lightRadius.x = idMath::Max(mLight.lightRadius.x, 1.f);
+    mLight.lightRadius.y = idMath::Max(mLight.lightRadius.y, 1.f);
+    mLight.lightRadius.z = idMath::Max(mLight.lightRadius.z, 1.f);
+}
+void rvLightParticle::SetOriginFromLocal(const idVec3& p) {
+    mLight.origin = p;
+}
+void rvLightParticle::SetAxis(const idMat3& m) {
+    mLight.axis = m;
 }
 
-/*
-=====================
-rvSegment::InitLight
-=====================
-*/
-void rvSegment::InitLight(rvBSE* effect, rvSegmentTemplate* st, float time)
-{
-	if (!mUsedHead)
-	{
-		SpawnParticle(effect, st, time, vec3_origin, mat3_identity);
-		mUsedHead->InitLight(effect, st, time);		
-	}
+// ───────── Destroy ───────────────────────────────────────────────────────────
+bool rvLightParticle::Destroy() {
+    if (mLightDefHandle != -1) {
+        session->rw->FreeLightDef(mLightDefHandle);
+        mLightDefHandle = -1;
+    }
+    return true;
 }
 
-/*
-=====================
-rvLightParticle::InitLight
-=====================
-*/
-bool rvLightParticle::InitLight(rvBSE* effect, rvSegmentTemplate* st, float time)
-{
-	bool result; // al
-	rvEnvParms* v8; // esi
-	rvEnvParms* v9; // ecx
-	rvParticleTemplate* v10; // ebp
-	float* v11; // esi
-	double v12; // st7
-	const idMaterial* v13; // ecx
-	float evalTime; // [esp+24h] [ebp-48h] BYREF
-	float v16; // [esp+28h] [ebp-44h]
-	idVec3 v17; // [esp+30h] [ebp-3Ch]
-	idVec3 v18; // [esp+3Ch] [ebp-30h]
-	idVec3 pos; // [esp+48h] [ebp-24h] BYREF
-	idVec3 v20; // [esp+54h] [ebp-18h] BYREF
-	idVec3 v21; // [esp+60h] [ebp-Ch] BYREF
-	float effectb; // [esp+74h] [ebp+8h]
-	float effecta; // [esp+74h] [ebp+8h]
-	float a6a; // [esp+7Ch] [ebp+10h]
+// ───────── InitLight ─────────────────────────────────────────────────────────
+bool rvLightParticle::InitLight(rvBSE* effect,
+    rvSegmentTemplate* st,
+    float              time) {
+    float evalTime;
+    if (!GetEvaluationTime(time, evalTime, /*looping*/false))
+        return false;
 
-	result = GetEvaluationTime(time, evalTime, 0);
-	if (result)
-	{
-		memset(&this->mLight, 0, sizeof(this->mLight));
-		v8 = st->GetParticleTemplate()->mpFadeEnvelope;
-		effectb = this->mEndTime - this->mStartTime;
-		v9 = st->GetParticleTemplate()->mpTintEnvelope;
-		v10 = st->GetParticleTemplate();
-		effecta = 1.0 / effectb;
-		v16 = evalTime;
-		v9->Evaluate(this->mTintEnv, evalTime, *(float*)&effecta, v20.ToFloatPtr());
-		v8->Evaluate(this->mFadeEnv, v16, *(float*)&effecta, v21.ToFloatPtr());
+    // clear, then evaluate env-parms
+    idVec4 tint;
+    idVec3 size;
+    idVec3 pos;
 
-		EvaluateSize(v10->mpSizeEnvelope, evalTime, effecta, pos.ToFloatPtr());
-		EvaluatePosition(effect, v10, pos, time);
+    memset(&mLight, 0, sizeof(mLight));
 
-		// 0 1 2 3
-		// 4 5 6 7
-		// 8 9 10 11
-		// 12 13 14 15
+    mTintEnv.Evaluate(evalTime, tint.ToFloatPtr());  // rgb
+    mFadeEnv.Evaluate(evalTime, &tint.w);            // alpha
 
-// jmarshall - eval
-		v17.x = effect->GetCurrentAxis()[2].x * pos.z
-			+ effect->GetCurrentAxis()[0].x * pos.x
-			+ effect->GetCurrentAxis()[1].x * pos.y;
-		v17.y = effect->GetCurrentAxis()[1].y * pos.y
-			+ effect->GetCurrentAxis()[0].y * pos.x
-			+ effect->GetCurrentAxis()[2].y * pos.z;
-		v17.z = pos.x * effect->GetCurrentAxis()[0].z
-			+ pos.y * effect->GetCurrentAxis()[1].z
-			+ pos.z * effect->GetCurrentAxis()[2].z;
-		v18.x = v17.x + effect->GetCurrentOrigin().x;
-		v18.y = effect->GetCurrentOrigin().y + v17.y;
-		v18.z = effect->GetCurrentOrigin().z + v17.z;
-		this->mLight.origin = v18;
-// jmarshall end
+   // EvaluateSize(evalTime, size); // jmarshall - fix me
+    const float localT = time - mMotionStartTime;
+    EvaluatePosition(effect, pos, localT);
 
-		this->mLight.origin = v18;
-		this->mLight.lightRadius = v20;
-		if (this->mLight.lightRadius.x < 1.0)
-			this->mLight.lightRadius.x = 1.0;
-		if (this->mLight.lightRadius.y < 1.0)
-			this->mLight.lightRadius.y = 1.0;
-		if (this->mLight.lightRadius.z < 1.0)
-			this->mLight.lightRadius.z = 1.0;
-		v12 = v21.x;
-// jmarshall
-		//qmemcpy(&this->mLight, &effecta->mCurrentAxis, 0x24u);
-// jmarshall end
-		this->mLight.shaderParms[0] = v12;
-		this->mLight.shaderParms[1] = v21.y;
-		this->mLight.shaderParms[2] = v21.z;
-		//this->mLight.maxVisDist = 4096;
-		v13 = v10->mMaterial;
-		//*(_BYTE*)&this->mLight.flags |= 4u;
-		this->mLight.shader = v10->GetMaterial();
-		//v14 = (renderLight_t::renderLightFlags_t)(*(_BYTE*)&this->mLight.flags ^ (*(_BYTE*)&this->mLight.flags ^ ~(unsigned __int8)((unsigned int)v10->mFlags >> 17)) & 1);
-		//this->mLight.flags = v14;
-		//this->mLight.flags = (renderLight_t::renderLightFlags_t)(*(_BYTE*)&v14 ^ (*(_BYTE*)&v14 ^ ~(2
-		//	* ((unsigned int)v10->mFlags >> 18))) & 2);
-		//this->mLight.manualPriority = 1;
-		//this->mLight.lightId = (int)&effecta->mCurrentAxis;
-		this->mLightDefHandle = common->RW()->AddLightDef(&mLight);
-		result = 1;
-	}
-	return result;
+    // Transform from local-segment space to world
+    // TODO: replace these raw accesses with proper data when template defined
+    const idMat3& segAxis = effect->mCurrentAxis;   
+    const idVec3& segOrigin = effect->mCurrentOrigin; 
+
+    idVec3 worldPos = pos * segAxis + segOrigin;
+    SetOriginFromLocal(worldPos);
+
+    mLight.lightRadius = size;
+    ClampRadius();
+
+    SetAxis(segAxis);
+
+    mLight.shaderParms[0] = tint.x;
+    mLight.shaderParms[1] = tint.y;
+    mLight.shaderParms[2] = tint.z;
+    mLight.shaderParms[3] = tint.w;
+
+    mLight.pointLight = true;
+    mLight.noShadows = (st->mFlags & SEGMENT_NO_SHADOWS) == 0; 
+    mLight.noSpecular = (st->mFlags & SEGMENT_NO_SPECULAR) == 0;
+    mLight.detailLevel = 10.f;
+  //  mLight.shader = st->mater; // assumption jmarshall - fix me
+
+    mLightDefHandle = session->rw->AddLightDef(&mLight);
+    return true;
 }
 
-bool rvLightParticle::PresentLight(rvBSE* effect, rvParticleTemplate* pt, float time, bool infinite)
-{
-	int v6; // edi
-	int v7; // esi MAPDST
-	bool result; // al
-	rvEnvParms* v11; // ecx
-	rvEnvParms* v12; // edi
-	double v14; // st7
-	int v15; // [esp+14h] [ebp-54h]
-	float oneOverDuration[3]; // [esp+24h] [ebp-44h] BYREF
-	idVec3 v18; // [esp+30h] [ebp-38h]
-	idVec3 position; // [esp+3Ch] [ebp-2Ch]
-	idVec3 size; // [esp+48h] [ebp-20h] BYREF
-	idVec4 tint; // [esp+54h] [ebp-14h] BYREF
-	float dest; // [esp+64h] [ebp-4h] BYREF
-	float retaddr; // [esp+68h] [ebp+0h]
-	float pta; // [esp+70h] [ebp+8h]
-	float ooduration; // [esp+78h] [ebp+10h]
-	float oodurationa; // [esp+78h] [ebp+10h]
+// ───────── PresentLight ──────────────────────────────────────────────────────
+bool rvLightParticle::PresentLight(rvBSE* segState, rvParticleTemplate* pt, float evalTime, bool infinite) {
+    float t;
+    if (!GetEvaluationTime(evalTime, t, infinite))
+        return false;
 
-	result = GetEvaluationTime(time, oneOverDuration[0], infinite);
-	if (result)
-	{
-		v11 = pt->mpTintEnvelope;
-		ooduration = this->mEndTime - this->mStartTime;
-		v15 = v6;
-		v12 = pt->mpFadeEnvelope;
-		oodurationa = 1.0 / ooduration;
-		pta = oneOverDuration[0];
-		v11->Evaluate(this->mTintEnv, oodurationa, oneOverDuration[0], tint.ToFloatPtr());
-		v12->Evaluate(this->mFadeEnv, oodurationa, pta, &dest);
-		EvaluateSize(pt->mpSizeEnvelope, oneOverDuration[0], oodurationa, size.ToFloatPtr());
-	
-		EvaluatePosition(effect, pt, size, time);
-		v18.x = effect->GetCurrentAxis()[2].x * size.z
-			+ effect->GetCurrentAxis()[0].x * size.x
-			+ effect->GetCurrentAxis()[1].x * size.y;
-		v18.y = effect->GetCurrentAxis()[1].y * size.y
-			+ effect->GetCurrentAxis()[0].y * size.x
-			+ effect->GetCurrentAxis()[2].y * size.z;
-		v18.z = size.x * effect->GetCurrentAxis()[0].z
-			+ size.y * effect->GetCurrentAxis()[1].z
-			+ size.z * effect->GetCurrentAxis()[2].z;
-		position.x = v18.x + effect->GetCurrentOrigin().x;
-		position.y = effect->GetCurrentOrigin().y + v18.y;
-		position.z = effect->GetCurrentOrigin().z + v18.z;
-		this->mLight.origin = position;
-		this->mLight.lightRadius.x = tint.x;
-		this->mLight.lightRadius.y = tint.y;
-		this->mLight.lightRadius.z = tint.z;
-		if (this->mLight.lightRadius.x < 1.0)
-			this->mLight.lightRadius.x = 1.0;
-		if (this->mLight.lightRadius.y < 1.0)
-			this->mLight.lightRadius.y = 1.0;
-		if (this->mLight.lightRadius.z < 1.0)
-			this->mLight.lightRadius.z = 1.0;
-		v14 = tint.w;
-		//qmemcpy(&this->mLight, &time->mCurrentAxis, 0x24u);
-		this->mLight.shaderParms[0] = v14;
-		this->mLight.shaderParms[1] = dest;
-		this->mLight.shaderParms[2] = retaddr;
-		this->mLight.suppressLightInViewID = effect->GetSuppressLightsInViewID();		
-		common->RW()->UpdateLightDef(mLightDefHandle, &mLight);
-		result = 1;
-	}
-	return result;
+    idVec4 tint;
+    idVec3 size;
+    idVec3 pos;
+
+    mTintEnv.Evaluate(t, tint.ToFloatPtr());
+    mFadeEnv.Evaluate(t, &tint.w);
+
+    EvaluateSize(&mSizeEnv, t, size);
+    const float localT = evalTime - mMotionStartTime;
+    EvaluatePosition(segState, pos, localT);
+
+    idVec3 worldPos = pos * segState->mCurrentAxis + segState->mCurrentOrigin;
+    SetOriginFromLocal(worldPos);
+
+    mLight.lightRadius = size;
+    ClampRadius();
+    SetAxis(segState->mCurrentAxis);
+
+    mLight.shaderParms[0] = tint.x;
+    mLight.shaderParms[1] = tint.y;
+    mLight.shaderParms[2] = tint.z;
+    mLight.shaderParms[3] = tint.w;
+
+    session->rw->UpdateLightDef(mLightDefHandle, &mLight);
+    return true;
 }

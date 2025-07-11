@@ -1,991 +1,1424 @@
-// BSE_ParseParticle2.cpp
-//
+﻿/*
+===========================================================================
+
+QUAKE 4 BSE CODE RECREATION EFFORT - (c) 2025 by Justin Marshall(IceColdDuke).
+
+QUAKE 4 BSE CODE RECREATION EFFORT is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+QUAKE 4 BSE CODE RECREATION EFFORT is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with QUAKE 4 BSE CODE RECREATION EFFORT.  If not, see <http://www.gnu.org/licenses/>.
+
+In addition, the QUAKE 4 BSE CODE RECREATION EFFORT is also subject to certain additional terms. You should have received a copy of these additional terms immediately following the terms and conditions of the GNU General Public License which accompanied the Doom 3 BFG Edition Source Code.  If not, please request a copy in writing from id Software at the address below.
+
+If you have questions concerning this license or the applicable additional terms, you may contact in writing id Software LLC, c/o ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
+
+===========================================================================
+*/
+
+#include "bse.h"
 
 
+/*
+===============================================================================
 
-#include "BSE_Envelope.h"
-#include "BSE_Particle.h"
-#include "BSE.h"
-#include "BSE_SpawnDomains.h"
+    Lifetime helpers
+    (small ones are placed first so they are easy to inline)
 
-rvTrailInfo rvParticleTemplate::sTrailInfo;
-rvElectricityInfo rvParticleTemplate::sElectricityInfo;
-rvEnvParms rvParticleTemplate::sDefaultEnvelope;
-rvEnvParms rvParticleTemplate::sEmptyEnvelope;
-rvParticleParms rvParticleTemplate::sSPF_ONE_1;
-rvParticleParms rvParticleTemplate::sSPF_ONE_2;
-rvParticleParms rvParticleTemplate::sSPF_ONE_3;
-rvParticleParms rvParticleTemplate::sSPF_NONE_0;
-rvParticleParms rvParticleTemplate::sSPF_NONE_1;
-rvParticleParms rvParticleTemplate::sSPF_NONE_3;
-bool rvParticleTemplate::sInited = false;
+===============================================================================
+*/
+bool rvParticleTemplate::UsesEndOrigin(void) const {
+    // Uses the line segment “origin -> endOrigin” for spawn / length domains?
+    return (mSpawnPosition.mFlags & 2) != 0 ||
+        (mSpawnLength.mFlags & 2) != 0;
+}
 
-float rvSegmentTemplate::mSegmentBaseCosts[SEG_COUNT];
+/*
+===============================================================================
 
-void rvParticleTemplate::AllocTrail()
+    Parameter-count derivation  ( size / rotate envelopes )
+
+    mType table
+    ---------------------------------------------------------
+      0 = sprite/quad    1 = beam          2 = billboard
+      3 = axis-aligned   4 = ribbon        5 = ribbon-extruded
+      6 = mesh-copy      7 = mesh-random   8 = decal
+      9 = point-light “glare” helper
+===============================================================================
+*/
+void rvParticleTemplate::SetParameterCounts(void) {
+    int sizeParms = 0;
+    int rotateParms = 0;
+    int sizeSpawn = 7;   // default = “vector” envelope
+    /*---------------------------------------------------------------------
+        The original x86 code used two packed bit-fields:
+            lower 2 bits – dimension count (0,1,2,3 axes)
+            upper bits   – shape variants (point, unit, scaled, etc.)
+    ---------------------------------------------------------------------*/
+    switch (mType) {
+    case 1:                     // beam
+    case 4:                     // ribbon
+        sizeParms = 2;
+        rotateParms = 1;
+        sizeSpawn = 6;        // two-component envelope
+        break;
+
+    case 2:                     // billboard
+    case 7:                     // mesh-random
+    case 8:                     // decal
+        sizeParms = 1;
+        rotateParms = 0;
+        sizeSpawn = 5;        // one-component envelope
+        break;
+
+    case 3:                     // axis-aligned (cone/cylinder)
+        sizeParms = 2;
+        rotateParms = 3;
+        sizeSpawn = 6;
+        break;
+
+    case 5:                     // ribbon-extruded
+        sizeParms = 3;
+        rotateParms = 3;
+        sizeSpawn = 7;
+        break;
+
+    case 6:                     // mesh-copy
+        sizeParms = 3;
+        rotateParms = 0;
+        sizeSpawn = 7;
+        break;
+
+    case 9:                     // glare helper
+        sizeParms = 0;
+        rotateParms = 3;
+        sizeSpawn = 7;
+        break;
+
+    default:                    // sprites (0) – counts already correct
+        return;
+    }
+
+    mNumSizeParms = sizeParms;
+    mNumRotateParms = rotateParms;
+
+    // Preserve editor intent – spawn/death domains must carry the same
+    // “shape” meta-information the envelope expects.
+    mSpawnSize.mSpawnType = sizeSpawn;
+    mDeathSize.mSpawnType = sizeSpawn;
+    mSpawnRotate.mSpawnType = rotateParms;
+    mDeathRotate.mSpawnType = rotateParms;
+}
+
+/*
+===============================================================================
+
+    Runtime helpers
+===============================================================================
+*/
+float rvParticleTemplate::GetSpawnVolume(rvBSE* fx) const {
+    // Compute the effective diagonal extents ( ≈ bounding-box diagonal ).
+    float xExtent;
+
+    if (mSpawnPosition.mFlags & 2 /*END_ORIGIN*/) {
+        idVec3 delta = fx->mOriginalEndOrigin - fx->mOriginalOrigin;
+        xExtent = delta.Length() - mSpawnPosition.mMins.x;
+    }
+    else {
+        xExtent = mSpawnPosition.mMaxs.x - mSpawnPosition.mMins.x;
+    }
+
+    const float yExtent = mSpawnPosition.mMaxs.y - mSpawnPosition.mMins.y;
+    const float zExtent = mSpawnPosition.mMaxs.z - mSpawnPosition.mMins.z;
+
+    // Historical: the 0.01 factor dates back to the old “cm” → “m” scale.
+    return (xExtent + yExtent + zExtent) * 0.01f;
+}
+
+// --------------------------------------------------------------------------
+
+float rvParticleTemplate::CostTrail(float baseCost) const {
+    switch (mTrailType) {
+    case 1: // burn
+        return baseCost * mTrailCount.y * 2.0f;
+
+    case 2: // motion blur
+        return baseCost * mTrailCount.y * 1.5f + 20.0f;
+
+    default:
+        return baseCost;
+    }
+}
+
+/*
+===============================================================================
+
+    Parameter sanitiser
+    (rewrites spawnType so the renderer can make fast decisions)
+
+===============================================================================
+*/
+void rvParticleTemplate::FixupParms(rvParticleParms& p) {
+    const int axisBits = p.mSpawnType & 3;      // 0..3
+    const int shapeBits = (p.mSpawnType & ~3);    // 0,4,8,(...)  etc.
+
+    // Explicit editor values “point” (0), “unit” (4) and the two tapered
+    // cone/cylinder variants (43,47) are left untouched.
+    if (shapeBits == 0 || shapeBits == 4 ||
+        p.mSpawnType == 43 || p.mSpawnType == 47) {
+        return;
+    }
+
+    // ---------------------------------------------------------------------
+    //  Detect degenerate cases where mins == maxs on the active axes.
+    //  These collapse to either POINT / UNIT / SCALE depending on size.
+    // ---------------------------------------------------------------------
+    const idVec3& mins = p.mMins;
+    const idVec3& maxs = p.mMaxs;
+
+    const bool equalX = (maxs.x == mins.x);
+    const bool equalY = (axisBits < 2) || (maxs.y == mins.x);
+    const bool equalZ = (axisBits != 3) || (maxs.z == mins.x);
+
+    if (shapeBits == 8 && equalX && equalY && equalZ) {      // a “box”
+        if (mins.x == 0.0f) {
+            p.mSpawnType = axisBits;           // true POINT
+        }
+        else if (idMath::Fabs(mins.x - 1.0f) < idMath::FLT_EPSILON) {
+            p.mSpawnType = axisBits + 4;       // UNIT-sized
+        }
+        else {
+            p.mSpawnType = axisBits + 8;       // general SCALE
+        }
+    }
+    else if (shapeBits == 8) {
+        // Mixed extents – still a SCALE box, but make sure the type’s
+        // “shape” bits say so even when the editor didn’t.
+        p.mSpawnType = axisBits + 8;
+    }
+
+    // ---------------------------------------------------------------------
+    //  Remove unused components ( renderer relies on 0 to skip work )
+    // ---------------------------------------------------------------------
+    if (p.mSpawnType >= 8) {
+        if (axisBits == 1) {                 // X/Y only
+            p.mMins.y = p.mMaxs.y = 0.0f;
+        }
+        else if (axisBits == 2) {          // X/Z only
+            p.mMins.z = p.mMaxs.z = 0.0f;
+        }
+    }
+    else {                                   // pure POINT / UNIT
+        p.mMins = vec3_origin;
+        p.mMaxs = vec3_origin;
+    }
+
+    // Enforce maxs == mins for POINT / UNIT / SCALE
+    if (p.mSpawnType <= 11) {
+        p.mMaxs = p.mMins;
+    }
+
+    // If this parameter references endOrigin, upgrade it to the
+    // corresponding “vector” (12-15) shape so the renderer knows it varies.
+    if ((p.mFlags & 2) && p.mSpawnType <= 12) {
+        p.mSpawnType = axisBits + 12;
+    }
+}
+
+/*
+===============================================================================
+
+    Master initialiser  (called by the default ctor)
+
+===============================================================================
+*/
+void rvParticleTemplate::Init(void) {
+    // ---------------------------------------------------------------------
+    //  Basic meta
+    // ---------------------------------------------------------------------
+    mFlags = 0;
+    mType = 0;
+
+    mMaterialName = "_default";
+    mMaterial = declManager->FindMaterial("_default", false);
+
+    mModelName = "_default";
+    mTraceModelIndex = -1;
+
+    mGravity.Zero();
+    mSoundVolume.Zero();
+    mFreqShift.Zero();
+    mDuration.Set(0.002f, 0.002f);
+
+    mBounce = 0.0f;
+    mTiling = 8.0f;
+
+    // ---------------------------------------------------------------------
+    //  Trail parameters
+    // ---------------------------------------------------------------------
+    mTrailType = 0;
+    mTrailMaterial = declManager->FindMaterial(
+        "gfx/effects/particles_shapes/motionblur", false);
+    mTrailTime.Zero();
+    mTrailCount.Zero();
+
+    // ---------------------------------------------------------------------
+    //  Fork / jitter
+    // ---------------------------------------------------------------------
+    mNumForks = 0;
+    mForkSizeMins.Set(-20, -20, -20);
+    mForkSizeMaxs = -mForkSizeMins;
+    mJitterSize.Set(3, 7, 7);
+    mJitterRate = 0.0f;
+    mJitterTable = static_cast<const idDeclTable*>(
+        declManager->FindType(DECL_TABLE,
+            "halfsintable",
+            false));
+
+    // ---------------------------------------------------------------------
+    //  Derived constants
+    // ---------------------------------------------------------------------
+    mNumSizeParms = 2;
+    mNumRotateParms = 1;
+    mVertexCount = 4;
+    mIndexCount = 6;
+    mCentre = vec3_origin;
+
+    // ---------------------------------------------------------------------
+    //  Helper to reset rvParticleParms blocks
+    // ---------------------------------------------------------------------
+    auto InitParms = [](rvParticleParms& p, int spawnType)
+        {
+            p.mSpawnType = spawnType;
+            p.mFlags = 0;
+            p.mRange = 0.0f;
+            p.mMisc = 0;
+            p.mMins = vec3_origin;
+            p.mMaxs = vec3_origin;
+        };
+
+    // ---------------------------------------------------------------------
+    //  Spawn domains
+    // ---------------------------------------------------------------------
+    InitParms(mSpawnPosition, 3);
+    InitParms(mSpawnDirection, 3);
+    InitParms(mSpawnVelocity, 3);
+    InitParms(mSpawnAcceleration, 3);
+    InitParms(mSpawnFriction, 3);
+    InitParms(mSpawnTint, 7);
+    InitParms(mSpawnFade, 5);
+    InitParms(mSpawnSize, 7);
+    InitParms(mSpawnRotate, 3);
+    InitParms(mSpawnAngle, 3);
+    InitParms(mSpawnOffset, 3);
+    InitParms(mSpawnLength, 3);
+
+    // ---------------------------------------------------------------------
+    //  Per-frame envelopes
+    // ---------------------------------------------------------------------
+    mTintEnvelope.Init();
+    mFadeEnvelope.Init();
+    mSizeEnvelope.Init();
+    mRotateEnvelope.Init();
+    mAngleEnvelope.Init();
+    mOffsetEnvelope.Init();
+    mLengthEnvelope.Init();
+
+    // ---------------------------------------------------------------------
+    //  Death domains
+    // ---------------------------------------------------------------------
+    InitParms(mDeathTint, 3);
+    InitParms(mDeathFade, 1);
+    InitParms(mDeathSize, 7);
+    InitParms(mDeathRotate, 3);
+    InitParms(mDeathAngle, 3);
+    InitParms(mDeathOffset, 3);
+    InitParms(mDeathLength, 3);
+
+    // ---------------------------------------------------------------------
+    //  Impact / timeout effects
+    // ---------------------------------------------------------------------
+    mNumImpactEffects = 0;
+    mNumTimeoutEffects = 0;
+    memset(mImpactEffects, 0, sizeof(mImpactEffects));
+    memset(mTimeoutEffects, 0, sizeof(mTimeoutEffects));
+}
+
+/*
+===============================================================================
+
+    Misc query helpers
+
+===============================================================================
+*/
+idTraceModel* rvParticleTemplate::GetTraceModel(void) const {
+    return (mTraceModelIndex >= 0)
+        ? bseLocal.traceModels[mTraceModelIndex]
+        : nullptr;
+}
+
+// --------------------------------------------------------------------------
+
+int rvParticleTemplate::GetTrailCount(void) const {
+    const int count = static_cast<int>(rvRandom::flrand(
+        mTrailCount.x,
+        mTrailCount.y));
+    return count < 0 ? 0 : count;
+}
+
+static inline void UpdateExtents(const idVec3& p, idVec3& minE, idVec3& maxE) {
+    minE.x = min(minE.x, p.x);
+    minE.y = min(minE.y, p.y);
+    minE.z = min(minE.z, p.z);
+    maxE.x = max(maxE.x, p.x);
+    maxE.y = max(maxE.y, p.y);
+    maxE.z = max(maxE.z, p.z);
+}
+
+void rvParticleTemplate::EvaluateSimplePosition(
+    idVec3* pos,
+    float time,
+    float lifeTime,
+    const idVec3* initPos,
+    const idVec3* velocity,
+    const idVec3* acceleration,
+    const idVec3* friction
+) {
+    // 1) Linear motion + constant acceleration term: x = x₀ + v·t + ½·a·t²
+    float t = time;
+    float t2 = t * t;
+    float halfT2 = 0.5f * t2;
+
+    pos->x = initPos->x + velocity->x * t + acceleration->x * halfT2;
+    pos->y = initPos->y + velocity->y * t + acceleration->y * halfT2;
+    pos->z = initPos->z + velocity->z * t + acceleration->z * halfT2;
+
+    // 2) Friction/damping integration term:
+    //    Derived from original: v12 = halfT2 * ((2^v9 - 1) * halfT2) / 3
+    //    where 2^v9 == exp((lifeTime - halfT2)/lifeTime)
+    float expFactor = std::exp((lifeTime - halfT2) / lifeTime) - 1.0f;
+    float frictionScalar = (halfT2 * halfT2 * expFactor) / 3.0f;
+
+    pos->x += friction->x * frictionScalar;
+    pos->y += friction->y * frictionScalar;
+    pos->z += friction->z * frictionScalar;
+}
+
+float rvParticleTemplate::GetFurthestDistance() const {
+    // 1) Gather min/max for each spawn parameter
+    idVec3 minPos, maxPos;
+    mSpawnPosition.GetMinsMaxs(minPos, maxPos);
+
+    idVec3 minVel, maxVel;
+    mSpawnVelocity.GetMinsMaxs(minVel, maxVel);
+
+    idVec3 minAccel, maxAccel;
+    mSpawnAcceleration.GetMinsMaxs(minAccel, maxAccel);
+
+    idVec3 minFric, maxFric;
+    mSpawnFriction.GetMinsMaxs(minFric, maxFric);
+
+    // 2) Choose appropriate gravity
+    float grav = game->IsMultiplayer()
+        ? cvarSystem->GetCVarFloat("g_mp_gravity")
+        : cvarSystem->GetCVarFloat("g_gravity");
+
+    // 3) Build gravity offset vector and scale by template gravity.x
+    idVec3 gravVec(0.0f, 0.0f, -grav);
+    float gx = mGravity.x;
+    gravVec.x *= gx;
+    gravVec.y *= gx;
+    gravVec.z *= gx;
+
+    // 4) Apply gravity offset to acceleration bounds
+    minAccel.x -= gravVec.x;  minAccel.y -= gravVec.y;  minAccel.z -= gravVec.z;
+    maxAccel.x -= gravVec.x;  maxAccel.y -= gravVec.y;  maxAccel.z -= gravVec.z;
+
+    // 5) Prepare overall min/max trackers
+    idVec3 overallMin(FLT_MAX, FLT_MAX, FLT_MAX);
+    idVec3 overallMax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+
+    // 6) Sample 8 time steps and all 16 combinations of parameter extremes
+    const float duration = mDuration.y;
+    const float step = duration * 0.125f;  // eighths
+    idVec3 pos;
+
+    for (int i = 0; i < 8; ++i) {
+        float t = i * step;
+        for (int p = 0; p < 2; ++p) {
+            const idVec3& initP = (p ? maxPos : minPos);
+            for (int v = 0; v < 2; ++v) {
+                const idVec3& vel = (v ? maxVel : minVel);
+                for (int a = 0; a < 2; ++a) {
+                    const idVec3& acc = (a ? maxAccel : minAccel);
+                    for (int f = 0; f < 2; ++f) {
+                        const idVec3& fr = (f ? maxFric : minFric);
+
+                        // Evaluate position for this combination
+                        this->EvaluateSimplePosition(&pos, t, duration,
+                            &initP, &vel, &acc, &fr);
+                        UpdateExtents(pos, overallMin, overallMax);
+                    }
+                }
+            }
+        }
+    }
+
+    // 7) Compute half‐extents distances
+    double distMin = overallMin.Length() * 0.5;
+    double distMax = overallMax.Length() * 0.5;
+
+    return (distMax > distMin) ? distMax : distMin;
+}
+
+/*
+===============================================================================
+
+    Static lexer helpers
+
+===============================================================================
+*/
+bool rvParticleTemplate::GetVector(idLexer* src, int components,
+    idVec3& out) {
+    assert(components >= 1 && components <= 3);
+
+    out.x = src->ParseFloat();
+
+    if (components > 1) {
+        if (!src->ExpectTokenString(","))
+            return false;
+        out.y = src->ParseFloat();
+
+        if (components > 2) {
+            if (!src->ExpectTokenString(","))
+                return false;
+            out.z = src->ParseFloat();
+        }
+    }
+    return true;
+}
+
+/*
+===============================================================================
+
+    Motion-envelope parser   ( {   envelope <table>
+                                   rate     <vec>
+                                   count    <vec>
+                                   offset   <vec>
+                                 } )
+===============================================================================
+*/
+bool rvParticleTemplate::ParseMotionParms(idLexer* src,
+    int           vecCount,
+    rvEnvParms& env)
 {
-	if (mTrailInfo != NULL) {
-		mTrailInfo = new rvTrailInfo();
-	}	
+    if (!src->ExpectTokenString("{"))
+        return false;
+
+    idToken tok;
+    while (src->ReadToken(&tok)) {
+        if (!idStr::Cmp(tok, "}"))
+            break;
+
+        if (!idStr::Icmp(tok, "envelope")) {
+
+            src->ReadToken(&tok);
+            env.mTable = static_cast<const idDeclTable*>(
+                declManager->FindType(DECL_TABLE,
+                    tok,
+                    false));
+
+        }
+        else if (!idStr::Icmp(tok, "rate")) {
+
+            if (!GetVector(src, vecCount, env.mRate))
+                return false;
+            env.mIsCount = false;
+
+        }
+        else if (!idStr::Icmp(tok, "count")) {
+
+            if (!GetVector(src, vecCount, env.mRate))
+                return false;
+            env.mIsCount = true;
+
+        }
+        else if (!idStr::Icmp(tok, "offset")) {
+
+            if (!GetVector(src, vecCount, env.mEnvOffset))
+                return false;
+
+        }
+        else {
+            common->Warning("^4BSE:^1 Invalid motion parameter '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(), src->GetFileName(), src->GetLineNum());
+            src->SkipBracedSection(true);
+        }
+    }
+
+    return true;
 }
 
-bool rvParticleTemplate::ParseBlendParms(rvDeclEffect* effect, idParser* src) {
-	idToken token;
-	if (!src->ReadToken(&token)) {
-		return false;
-	}
-
-	if (idStr::Icmp(token, "add") != 0) {
-		src->Error("Invalid blend type");
-		return false;
-	}
-
-	mFlags |= 0x8000u;
-	return true;
-}
-
-bool rvParticleTemplate::ParseImpact(rvDeclEffect* effect, idParser* src) {
-	if (!src->ExpectTokenString("{")) {
-		return false;
-	}
-
-	mFlags |= 0x200u;
-	idToken token;
-	while (src->ReadToken(&token) && idStr::Cmp(token, "}")) {
-		if (idStr::Icmp(token, "effect") == 0) {
-			if (mNumImpactEffects >= 4) {
-				src->Error("too many impact effects");
-				return false;
-			}
-			mImpactEffects[mNumImpactEffects++] = declManager->FindEffect(token);
-		}
-		else if (idStr::Icmp(token, "remove") == 0) {
-			mFlags |= src->ParseInt() ? 0x400u : 0xFFFFFBFF;
-		}
-		else if (idStr::Icmp(token, "bounce") == 0) {
-			mBounce = src->ParseFloat();
-		}
-		else if (idStr::Icmp(token, "physicsDistance") == 0) {
-			mPhysicsDistance = src->ParseFloat();
-		}
-		else {
-			src->Error("Invalid impact parameter");
-			return false;
-		}
-	}
-
-	return true;
-}
-bool rvParticleTemplate::ParseTimeout(rvDeclEffect* effect, idParser* src) {
-	if (!src->ExpectTokenString("{")) {
-		return false;
-	}
-
-	idToken token;
-	while (src->ReadToken(&token) && idStr::Cmp(token, "}")) {
-		if (idStr::Icmp(token, "effect") == 0) {
-			if (mNumTimeoutEffects >= 4) {
-				src->Error("Too many timeout effects");
-				return false;
-			}
-			mTimeoutEffects[mNumTimeoutEffects++] = declManager->FindEffect(token);
-		}
-		else {
-			src->Error("Invalid timeout parameter");
-			return false;
-		}
-	}
-
-	return true;
-}
-
-rvEnvParms* rvParticleTemplate::ParseMotionParms(idParser* src, int count, rvEnvParms* def) {
-	if (!src->ExpectTokenString("{")) {
-		return def;
-	}
-
-	rvEnvParms* newParms = new rvEnvParms();
-	newParms->Init();
-
-	idToken token;
-	while (src->ReadToken(&token) && idStr::Cmp(token, "}")) {
-		if (idStr::Icmp(token, "envelope") == 0) {
-			src->ReadToken(&token);
-			newParms->mTable = declManager->FindTable(token); // Find and assign the envelope table
-		}
-		else if (idStr::Icmp(token, "rate") == 0) {
-			src->Parse1DMatrix(count, newParms->mRate.ToFloatPtr(), true);
-			newParms->mIsCount = false; // Assuming 'rate' implies not count
-		}
-		else if (idStr::Icmp(token, "count") == 0) {
-			src->Parse1DMatrix(count, newParms->mRate.ToFloatPtr(), true);
-			newParms->mIsCount = true;
-		}
-		else if (idStr::Icmp(token, "offset") == 0) {
-			src->Parse1DMatrix(count, newParms->mEnvOffset.ToFloatPtr(), true);
-		}
-		else {
-			src->Error("Invalid motion parameter");
-			delete newParms; // Ensure to clean up allocated memory
-			return def;
-		}
-	}
-
-	if (newParms->Compare(*def)) {
-		delete newParms; // If new parameters match the default, no need to keep them
-		return def;
-	}
-
-	return newParms; // Return the new, customized parameters
-}
-
-
-bool rvParticleTemplate::ParseMotionDomains(rvDeclEffect* effect, idParser* src) {
-	if (!src->ExpectTokenString("{")) {
-		return false;
-	}
-
-	idToken token;
-	while (src->ReadToken(&token)) {
-		if (token == "}") {
-			return true; // Successfully parsed all motion domains.
-		}
-		else if (token.Icmp("tint") == 0) {
-			mpTintEnvelope = ParseMotionParms(src, 3, &sDefaultEnvelope);
-		}
-		else if (token.Icmp("fade") == 0) {
-			mpFadeEnvelope = ParseMotionParms(src, 1, &sDefaultEnvelope);
-		}
-		else if (token.Icmp("size") == 0) {
-			mpSizeEnvelope = ParseMotionParms(src, mNumSizeParms, &sDefaultEnvelope);
-		}
-		else if (token.Icmp("rotate") == 0) {
-			mpRotateEnvelope = ParseMotionParms(src, mNumRotateParms, &sDefaultEnvelope);
-		}
-		else if (token.Icmp("angle") == 0) {
-			mpAngleEnvelope = ParseMotionParms(src, 3, &sDefaultEnvelope);
-		}
-		else if (token.Icmp("offset") == 0) {
-			mpOffsetEnvelope = ParseMotionParms(src, 3, &sDefaultEnvelope);
-		}
-		else if (token.Icmp("length") == 0) {
-			mpLengthEnvelope = ParseMotionParms(src, 3, &sDefaultEnvelope);
-		}
-		else {
-			src->Error("Invalid motion domain '%s'", token.c_str());
-			src->SkipBracedSection(1); // Skip the erroneous section to continue parsing.
-			return false; // Optionally return false here if you want to stop parsing at the first error.
-		}
-	}
-
-	// If the loop exits without finding a closing "}", it's an error in the file structure.
-	src->Error("Missing closing '}' for motion domains");
-	return false;
-}
-
-void rvParticleTemplate::FixupParms(rvParticleParms* parms)
+// ==========================================================================
+//  Motion-domain block
+// ==========================================================================
+bool rvParticleTemplate::ParseMotionDomains(rvDeclEffect* effect,
+    idLexer* src)
 {
-	if (!parms) return;
+    if (!src->ExpectTokenString("{"))
+        return false;
 
-	// Simplify comparisons by reducing complex conditional checks.
-	auto& maxs = parms->mMaxs;
-	auto& mins = parms->mMins;
-	auto type = parms->mSpawnType & 3; // Mask to get base type.
-	auto modifier = parms->mSpawnType & ~3; // Mask to get modifier.
+    idToken tok;
+    while (src->ReadToken(&tok)) {
 
-	// Early exit for certain types that don't need fixing.
-	if (modifier == 0 || modifier == 4 || parms->mSpawnType == 43 || parms->mSpawnType == 47) return;
+        if (!idStr::Cmp(tok, "}"))
+            break;
 
-	// If mins and maxs are equal across the specified dimensions, adjust the spawn type accordingly.
-	bool equalAcrossDimensions = true;
-	for (int i = 0; i < type; ++i) {
-		if (mins[i] != maxs[i]) {
-			equalAcrossDimensions = false;
-			break;
-		}
-	}
+        //--------------------------------------------------------------
+        //  Dispatch to the right envelope; vector-count depends on type
+        //--------------------------------------------------------------
+        if (!idStr::Icmp(tok, "tint")) ParseMotionParms(src, 3, mTintEnvelope);
+        else if (!idStr::Icmp(tok, "fade")) ParseMotionParms(src, 1, mFadeEnvelope);
+        else if (!idStr::Icmp(tok, "size")) ParseMotionParms(src, mNumSizeParms,
+            mSizeEnvelope);
+        else if (!idStr::Icmp(tok, "rotate")) ParseMotionParms(src, mNumRotateParms,
+            mRotateEnvelope);
+        else if (!idStr::Icmp(tok, "angle")) ParseMotionParms(src, 3, mAngleEnvelope);
+        else if (!idStr::Icmp(tok, "offset")) ParseMotionParms(src, 3, mOffsetEnvelope);
+        else if (!idStr::Icmp(tok, "length")) ParseMotionParms(src, 3, mLengthEnvelope);
+        else {
+            // Unknown keyword – skip nested section so parsing can continue
+            common->Warning("^4BSE:^1 Invalid motion domain '%s' in '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(),
+                effect->GetName(),
+                src->GetFileName(),
+                src->GetLineNum());
+            src->SkipBracedSection(true);
+        }
+    }
 
-	if (equalAcrossDimensions) {
-		if (mins[0] == 0.0f) {
-			parms->mSpawnType = type;
-		}
-		else if (mins[0] == 1.0f) {
-			parms->mSpawnType = type + 4;
-		}
-		else {
-			parms->mSpawnType = type + 8;
-		}
-	}
-	else if (modifier == 8) {
-		parms->mSpawnType = type + 8;
-	}
-
-	// Zero out unused dimensions based on the type.
-	switch (type) {
-	case 1: // 1D
-		mins[1] = mins[2] = maxs[1] = maxs[2] = 0.0f;
-		break;
-	case 2: // 2D
-		mins[2] = maxs[2] = 0.0f;
-		break;
-	}
-
-	// If spawn type is within a certain range, align mins and maxs.
-	if (parms->mSpawnType <= 0xBu) {
-		maxs = mins;
-	}
-
-	// Adjust spawn type based on flags.
-	if (parms->mFlags & 2) {
-		if (parms->mSpawnType <= 0xCu) parms->mSpawnType = type + 12;
-	}
+    return true;
 }
 
-bool rvParticleTemplate::CheckCommonParms(idParser* src, rvParticleParms& parms)
+/*
+========================
+rvParticleTemplate::GetMaxParmValue
+========================
+*/
+float rvParticleTemplate::GetMaxParmValue(rvParticleParms* spawn, rvParticleParms* death, rvEnvParms* envelope) {
+    float     minScale, maxScale;   // <- what Hex-Rays called “min” and (wrongly) “spawn”
+    idBounds  sBounds, dBounds;
+
+    // Raw bounds for the particle at spawn
+    spawn->GetMinsMaxs(sBounds.b[0], sBounds.b[1]);
+
+    // Envelope supplies two scalar multipliers (usually 0–1)
+    if (envelope->GetMinMax(minScale, maxScale))
+    {
+        // Scale the spawn bounds
+        sBounds.b[0] *= minScale;
+        sBounds.b[1] *= maxScale;
+
+        // Bounds at death, scaled in the same way
+        death->GetMinsMaxs(dBounds.b[0], dBounds.b[1]);
+        dBounds.b[0] *= minScale;
+        dBounds.b[1] *= maxScale;
+
+        // Expand sBounds so it encloses dBounds
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            if (dBounds.b[0][axis] < sBounds.b[0][axis]) sBounds.b[0][axis] = dBounds.b[0][axis];
+            if (dBounds.b[1][axis] > sBounds.b[1][axis]) sBounds.b[1][axis] = dBounds.b[1][axis];
+        }
+    }
+
+    // Length of the two opposite corners from the origin
+    float cornerMin = sBounds.b[0].Length();
+    float cornerMax = sBounds.b[1].Length();
+
+    return idMath::Max(cornerMin, cornerMax);
+}
+
+// ==========================================================================
+//  Flag parsing shared by *every* spawn shape
+// ==========================================================================
+bool rvParticleTemplate::CheckCommonParms(idLexer* src,
+    rvParticleParms& p)
 {
-	idToken token;
-	while (src->ReadToken(&token)) {
-		if (token == "}") {
-			return true; // Successfully parsed common parameters.
-		}
-		else if (token.Icmp("surface") == 0) {
-			parms.mFlags |= 1u;
-		}
-		else if (token.Icmp("useEndOrigin") == 0) {
-			parms.mFlags |= 2u;
-		}
-		else if (token.Icmp("cone") == 0) {
-			parms.mFlags |= 4u;
-		}
-		else if (token.Icmp("relative") == 0) {
-			parms.mFlags |= 8u;
-		}
-		else if (token.Icmp("linearSpacing") == 0) {
-			parms.mFlags |= 0x10u;
-		}
-		else if (token.Icmp("attenuate") == 0) {
-			parms.mFlags |= 0x20u;
-		}
-		else if (token.Icmp("inverseAttenuate") == 0) {
-			parms.mFlags |= 0x40u;
-		}
-		else {
-			src->Error("Unknown parameter '%s'", token.c_str());
-			return false; // Consider returning false on unknown parameters to halt parsing.
-		}
-	}
+    idToken tok;
+    while (src->ReadToken(&tok)) {
 
-	src->Error("Missing closing '}' for common parameters");
-	return false; // If loop exits, closing "}" wasn't found, indicating an error.
+        if (!idStr::Cmp(tok, "}"))
+            break;
+
+        if (!idStr::Icmp(tok, "surface")) p.mFlags |= 0x01;
+        else if (!idStr::Icmp(tok, "useEndOrigin")) p.mFlags |= 0x02;
+        else if (!idStr::Icmp(tok, "cone")) p.mFlags |= 0x04;
+        else if (!idStr::Icmp(tok, "relative")) p.mFlags |= 0x08;
+        else if (!idStr::Icmp(tok, "linearSpacing")) p.mFlags |= 0x10;
+        else if (!idStr::Icmp(tok, "attenuate")) p.mFlags |= 0x20;
+        else if (!idStr::Icmp(tok, "inverseAttenuate")) p.mFlags |= 0x40;
+        else {
+            common->Warning("^4BSE:^1 Unknown spawn flag '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(), src->GetFileName(), src->GetLineNum());
+        }
+    }
+    return true;        // nothing fatal here – bad keywords are soft-warnings
 }
 
-rvParticleParms* rvParticleTemplate::ParseSpawnParms(rvDeclEffect* effect, idParser* src, int count, rvParticleParms* def) {
-	idToken token;
 
-	if (!src->ExpectTokenString("{")) {
-		return def;
-	}
-
-	if (!src->ReadToken(&token) || token == "}") {
-		return def;
-	}
-
-	rvParticleParms* parms = new rvParticleParms(); // Allocate new parameters object.
-
-	// Map geometric types to spawn types and parse relevant data.
-	std::map<std::string, int> spawnTypeOffsets = {
-		{"box", 16}, {"sphere", 24}, {"cylinder", 32}, {"model", 44},
-		{"spiral", 40}, {"line", 12}, {"point", 8}
-	};
-
-	auto it = spawnTypeOffsets.find(token.c_str());
-	if (it != spawnTypeOffsets.end()) {
-		parms->mSpawnType = count + it->second;
-
-		if (token == "model") {
-			src->ReadToken(&token);
-			idRenderModel* model = renderModelManager->FindModel(token);
-			if (!model) {
-				src->Error("Failed to load model %s\n", token.c_str());
-				delete parms; // Clean up to prevent memory leak.
-				return def;
-			}
-			parms->mModelInfo = new sdModelInfo(); // Allocate new model info.
-			parms->mModelInfo->model = model;
-		}
-		else if (token != "point") {
-			// For geometric types other than 'point', parse mins and maxs.
-			src->Parse1DMatrix(count, parms->mMins.ToFloatPtr(), true);
-			src->ExpectTokenString(",");
-			src->Parse1DMatrix(count, parms->mMaxs.ToFloatPtr(), true);
-
-			if (token == "spiral") {
-				parms->mRange = src->ParseFloat(); // Specific to 'spiral'.
-			}
-		}
-		else {
-			// For 'point', only parse mins as it represents a single point.
-			src->Parse1DMatrix(count, parms->mMins.ToFloatPtr(), true);
-		}
-
-		// Check and apply common parameters.
-		if (!CheckCommonParms(src, *parms)) {
-			src->Error("Invalid %s parameter!", token.c_str());
-			delete parms; // Clean up to prevent memory leak.
-			return def;
-		}
-
-		// Apply fixes based on the parsed parameters.
-		FixupParms(parms);
-
-		return parms;
-	}
-	else {
-		src->Error("Unknown spawn type: %s", token.c_str());
-		delete parms; // Clean up to prevent memory leak.
-		return def;
-	}
-}
-
-bool rvParticleTemplate::ParseSpawnDomains(rvDeclEffect* effect, idParser* src) {
-	idToken token;
-
-	src->ExpectTokenString("{");
-	while (true) {
-		src->ReadToken(&token);
-
-		if (token == "}")
-			break;
-
-		if (token == "windStrength") {
-			mpSpawnWindStrength = ParseSpawnParms(effect, src, 1, &rvParticleTemplate::sSPF_NONE_1);
-		}
-		else if (token == "length") {
-			mpSpawnLength = ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_NONE_3);
-		}
-		else if (token == "offset") {
-			mpSpawnOffset = ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_NONE_3);
-		}
-		else if (token == "angle") {
-			mpSpawnAngle = ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_NONE_3);
-		}
-		else if (token == "rotate") {
-			mpSpawnRotate = ParseSpawnParms(effect, src, mNumRotateParms, &rvParticleTemplate::sSPF_NONE_3);
-		}
-		else if (token == "size") {
-			mpSpawnSize = ParseSpawnParms(effect, src, mNumSizeParms, &rvParticleTemplate::sSPF_ONE_3);
-		}
-		else if (token == "fade") {
-			mpSpawnFade = ParseSpawnParms(effect, src, 1, &rvParticleTemplate::sSPF_ONE_1);
-		}
-		else if (token == "tint") {
-			mpSpawnTint = ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_ONE_3);
-		}
-		else if (token == "friction") {
-			mpSpawnFriction = ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_NONE_3);
-		}
-		else if (token == "acceleration") {
-			mpSpawnAcceleration = ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_NONE_3);
-		}
-		else if (token == "velocity") {
-			mpSpawnVelocity = ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_NONE_3);
-		}
-		else if (token == "direction") {
-			mpSpawnDirection = rvParticleTemplate::ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_NONE_3);
-			mFlags |= 0x4000u;
-		}
-		else if (token == "position") {
-			mpSpawnPosition = rvParticleTemplate::ParseSpawnParms(effect, src, 3, &rvParticleTemplate::sSPF_NONE_3);
-		}
-		else {
-			src->Error("Invalid spawn type %s\n", token.c_str());
-		}
-	}
-
-	return true;
-}
-
-bool rvParticleTemplate::ParseDeathDomains(rvDeclEffect* effect, idParser* src) {
-	idToken token;
-
-	src->ExpectTokenString("{");
-	while (src->ReadToken(&token) && token != "}") {
-		int numParms = 0;
-		rvParticleParms** targetParm = nullptr;
-		rvEnvParms** targetEnvelope = nullptr;
-
-		if (token == "length") {
-			numParms = 3; 
-			targetParm = &mpDeathLength; 
-			targetEnvelope = &mpLengthEnvelope;
-		}
-		else if (token == "offset") {
-			numParms = 3; 
-			targetParm = &mpDeathOffset; 
-			targetEnvelope = &mpOffsetEnvelope;
-		}
-		else if (token == "angle") {
-			numParms = 3; 
-			targetParm = &mpDeathAngle; 
-			targetEnvelope = &mpAngleEnvelope;
-		}
-		else if (token == "rotate") {
-			numParms = mNumRotateParms; 
-			targetParm = &mpDeathRotate; 
-			targetEnvelope = &mpRotateEnvelope;
-		}
-		else if (token == "size") {
-			numParms = mNumSizeParms; 
-			targetParm = &mpDeathSize; 
-			targetEnvelope = &mpSizeEnvelope;
-		}
-		else if (token == "fade") {
-			numParms = 1; 
-			targetParm = &mpDeathFade; 
-			targetEnvelope = &mpFadeEnvelope;
-		}
-		else if (token == "tint") {
-			numParms = 3; 
-			targetParm = &mpDeathTint;
-			targetEnvelope = &mpTintEnvelope;
-		}
-		else {
-			src->Error("Invalid end type %s\n", token.c_str());
-			continue;
-		}
-
-		*targetParm = ParseSpawnParms(effect, src, numParms, &rvParticleTemplate::sSPF_NONE_3);
-		if (*targetEnvelope == &rvParticleTemplate::sEmptyEnvelope) {
-			*targetEnvelope = &rvParticleTemplate::sDefaultEnvelope;
-		}
-	}
-
-	return true;
-}
-
-bool rvParticleTemplate::Parse(rvDeclEffect* effect, idParser* src) {
-	idToken token;
-
-	src->ExpectTokenString("{");	
-	while (true) {
-		src->ReadToken(&token);
-
-		if (token == "}")
-			break;
-
-		if (token == "windDeviationAngle") {
-			mWindDeviationAngle = src->ParseFloat();
-		}
-		else if (token == "timeout") {
-			ParseTimeout(effect, src);
-		}
-		else if (token == "impact") {
-			ParseImpact(effect, src);
-		}
-		else if (token == "model") {
-			src->ReadToken(&token);
-			mModel = renderModelManager->FindModel(token);
-
-			if (mModel == NULL) {
-				mModel = renderModelManager->FindModel("_default");
-
-				src->Warning("No surfaces defined in model %s", token.c_str());
-			}
-		}
-		else if (token == "numFrames") {
-			mNumFrames = src->ParseInt();
-		}
-		else if (token == "fadeIn") {
-			// TODO  v3->mFlags |= (unsigned int)&vwin8192[2696]; <-- garbage.
-		}
-		else if (token == "useLightningAxis") {
-			mFlags |= 0x400000u;
-		}
-		else if (token == "specular") {
-			mFlags |= 0x40000u;
-		}
-		else if (token == "shadows") {
-			mFlags |= 0x20000u;
-		}
-		else if (token == "blend") {
-			ParseBlendParms(effect, src);
-		}
-		else if (token == "entityDef") {
-			src->ReadToken(&token);
-			mEntityDefName = token;
-		}
-		else if (token == "material") {
-			src->ReadToken(&token);
-			mMaterial = declManager->FindMaterial(token);
-		}
-		else if (token == "trailScale") {
-			AllocTrail();
-			mTrailInfo->mTrailScale = src->ParseFloat();
-		}
-		else if (token == "trailCount") {
-			AllocTrail();
-			mTrailInfo->mTrailCount.x = src->ParseFloat();
-			src->ExpectTokenString(",");
-			mTrailInfo->mTrailCount.y = src->ParseFloat();
-		}
-		else if (token == "trailRepeat") {
-			AllocTrail();
-			mTrailRepeat = src->ParseInt();
-		}
-		else if (token == "trailTime") {
-			AllocTrail();
-			mTrailInfo->mTrailTime.x = src->ParseFloat();
-			src->ExpectTokenString(",");
-			mTrailInfo->mTrailTime.y = src->ParseFloat();
-		}
-		else if (token == "trailMaterial") {
-			AllocTrail();
-			src->ReadToken(&token);
-			mTrailInfo->mTrailMaterial = declManager->FindMaterial(token);
-		}
-		else if (token == "trailType") {
-			src->ReadToken(&token);
-
-			if (token == "burn") {
-				mTrailInfo->mTrailType = 1;
-			}
-			else if (token == "motion") {
-				mTrailInfo->mTrailType = 2;
-			}
-			else {
-				mTrailInfo->mTrailType = 3;
-				mTrailInfo->mTrailTypeName = token;
-			}
-		}
-		else if (token == "gravity") {
-			mGravity.x = src->ParseFloat();
-			src->ExpectTokenString(",");
-			mGravity.y = src->ParseFloat();
-		}
-		else if (token == "duration") {
-			float srcb = src->ParseFloat();
-			float v8 = 0.0020000001;
-			if (srcb >= 0.0020000001)
-			{
-				v8 = srcb;
-				if (srcb > 300.0)
-					v8 = 300.0;
-			}
-			float srcg = v8;
-			mDuration.x = srcg;
-			src->ExpectTokenString(",");
-
-			float srcc = src->ParseFloat();
-			float v9 = 0.0020000001;
-			if (srcc < 0.0020000001 || (v9 = srcc, srcc <= 300.0))
-			{
-				float srch = v9;
-				mDuration.y = srch;
-			}
-			else
-			{
-				mDuration.y = 300.0;
-			}
-		}
-		else if (token == "parentvelocity") {
-			mFlags |= 0x2000000u;
-		}
-		else if (token == "tiling") {
-			mFlags |= 0x100000u;
-			float srca = src->ParseFloat();
-			float v7 = 0.0020000001;
-			if (srca < 0.0020000001 || (v7 = srca, srca <= 1024.0))
-			{
-				float srcf = v7;
-				mTiling = srcf;
-			}
-			else
-			{
-				mTiling = 1024.0;
-			}
-		}
-		else if (token == "persist") {
-			mFlags |= 0x200000u;
-		}
-		else if (token == "generatedLine") {
-			mFlags |= 0x10000u;
-		}
-		else if (token == "flipNormal") {
-			mFlags |= 0x2000u;
-		}
-		else if (token == "lineHit") {
-			mFlags |= 0x4000000u;
-		}
-		else if (token == "generatedOriginNormal") {
-			mFlags |= 0x1000u;
-		}
-		else if (token == "generatedNormal") {
-			mFlags |= 0x800u;
-		}
-		else if (token == "motion") {
-			ParseMotionDomains(effect, src);
-		}
-		else if (token == "end") {
-			ParseDeathDomains(effect, src);
-		}
-		else if (token == "start") {
-			ParseSpawnDomains(effect, src);
-		}
-		else {
-			src->Error("Invalid particle keyword %s\n", token.c_str());
-		}
-	}
-
-	Finish();
-
-	return true;
-}
-
-void rvParticleTemplate::Duplicate(rvParticleTemplate const& copy) {
-
-}
-void rvParticleTemplate::Finish() {
-	double v2; // st7
-	rvParticleTemplate* v3; // esi
-	rvTrailInfo* v4; // eax
-	float* v5; // eax
-	const modelSurface_t* v6; // eax
-	const modelSurface_t* v7; // ebp
-	idTraceModel* v8; // eax
-	idTraceModel* v9; // edi
-	idBounds* v10; // ebp
-	rvTrailInfo* v11; // ecx
-	rvElectricityInfo* v12; // eax
-	float v13; // ST10_4
-	float v14; // ST10_4
-	rvTrailInfo* v15; // ecx
-	float v16; // ST10_4
-	rvTrailInfo* v17; // ecx
-	double v18; // st6
-	float* v19; // ecx
-	float v20; // ST10_4
-	float* v21; // eax
-	float v22; // ST14_4
-	float v23; // ST18_4
-	float v24; // ST1C_4
-	float v25; // ST20_4
-	float v26; // ST24_4
-	float v27; // ST28_4
-	signed int retaddr; // [esp+2Ch] [ebp+0h]
-
-	v2 = 0.0;
-	v3 = this;
-	v3->mFlags |= 0x100u;
-	v4 = this->mTrailInfo;
-	if ((!v4->mTrailType || v4->mTrailType == 3) && !v4->mStatic)
-	{
-		v4->mTrailTime.y = 0.0;
-		v4->mTrailTime.x = 0.0;
-		v5 = &this->mTrailInfo->mTrailCount.x;
-		v5[1] = 0.0;
-		*v5 = 0.0;
-	}
-	switch (this->mType)
-	{
-	case 1:
-	case 2:
-		v11 = this->mTrailInfo;
-		v3->mVertexCount = 4;
-		v3->mIndexCount = 6;
-		if (0.0 != v11->mTrailCount.y && v11->mTrailType == 1)
-		{
-			v3->mVertexCount *= (unsigned __int16)v3->GetMaxTrailCount();
-			v2 = 0.0;
-			v3->mIndexCount *= (unsigned __int16)v3->GetMaxTrailCount();
-		}
-		break;
-	case 4:
-	case 6:
-	case 8:
-	case 9:
-		this->mVertexCount = 4;
-		this->mIndexCount = 6;
-		break;
-	case 5:
-		v6 = this->mModel->Surface(0);
-		v7 = v6;
-		if (v6)
-		{
-			v3->mVertexCount = v6->geometry->numVerts;// *(_WORD*)(*(_DWORD*)(v6 + 8) + 48);
-			v3->mIndexCount = v6->geometry->numIndexes; // *(_WORD*)(*(_DWORD*)(v6 + 8) + 56);
-		}
-		v3->mMaterial = *(idMaterial**)(v6 + 4);
-		v3->PurgeTraceModel();
-		v8 = (idTraceModel*)operator new(0xB4Cu);
-		v9 = v8;
-		retaddr = 0;
-		if (v8)
-		{
-			v10 = *(idBounds**)(v7 + 8);
-			v8->InitBox();
-			v9->SetupBox(*v10);
-		}
-		retaddr = -1;
-		v2 = 0.0;
-		v3->mTraceModelIndex = bse->AddTraceModel(v8);
-		break;
-	case 7:
-		v12 = this->mElecInfo;
-		this->mVertexCount = 20 * (LOWORD(v12->mNumForks) + 1);
-		this->mIndexCount = 60 * (LOWORD(v12->mNumForks) + 1);
-		break;
-	case 0xA:
-		this->mVertexCount = 0;
-		this->mIndexCount = 0;
-		break;
-	default:
-		break;
-	}
-	if (v3->mDuration.y <= (double)v3->mDuration.x)
-	{
-		v13 = v3->mDuration.x;
-		v3->mDuration.x = v3->mDuration.y;
-		v3->mDuration.y = v13;
-	}
-	if (v3->mGravity.y <= (double)v3->mGravity.x)
-	{
-		v14 = v3->mGravity.x;
-		v3->mGravity.x = v3->mGravity.y;
-		v3->mGravity.y = v14;
-	}
-	v15 = v3->mTrailInfo;
-	if (!v15->mStatic)
-	{
-		if (v15->mTrailTime.y <= (double)v15->mTrailTime.x)
-		{
-			v16 = v15->mTrailTime.x;
-			v15->mTrailTime.x = v15->mTrailTime.y;
-			v15->mTrailTime.y = v16;
-		}
-		v17 = v3->mTrailInfo;
-		v18 = v17->mTrailCount.x;
-		v19 = &v17->mTrailCount.x;
-		if (v19[1] <= v18)
-		{
-			v20 = *v19;
-			*v19 = v19[1];
-			v19[1] = v20;
-		}
-	}
-	v3->mCentre.z = v2;
-	v3->mCentre.y = v2;
-	v3->mCentre.x = v2;
-	if (!(((unsigned int)v3->mFlags >> 12) & 1))
-	{
-		v21 = (float*)&v3->mpSpawnPosition->mSpawnType;
-		switch (*(unsigned __int8*)v21)
-		{
-		case 0xBu:
-			v3->mCentre.x = v21[3];
-			v3->mCentre.y = v21[4];
-			v3->mCentre.z = v21[5];
-			break;
-		case 0xFu:
-		case 0x13u:
-		case 0x17u:
-		case 0x1Bu:
-		case 0x1Fu:
-		case 0x23u:
-		case 0x27u:
-		case 0x2Bu:
-		case 0x2Fu:
-			v22 = v21[6] + v21[3];
-			v23 = v21[7] + v21[4];
-			v24 = v21[8] + v21[5];
-			v25 = v22 * 0.5;
-			v26 = v23 * 0.5;
-			v27 = 0.5 * v24;
-			v3->mCentre.x = v25;
-			v3->mCentre.y = v26;
-			v3->mCentre.z = v27;
-			break;
-		default:
-			return;
-		}
-	}
-}
-
-void rvParticleTemplate::InitStatic()
+// ==========================================================================
+//  Spawn-parameter parser  (point, line, box … model)
+// ==========================================================================
+bool rvParticleTemplate::ParseSpawnParms(rvDeclEffect* effect,
+    idLexer* src,
+    rvParticleParms& p,
+    int            vecCount)
 {
-	if (!rvParticleTemplate::sInited) {
-		rvParticleTemplate::sInited = true;
-		rvParticleTemplate::sTrailInfo.mTrailType = 0;
+    //----------------------------------------------------------
+    //  Helper for shape keyword errors (minimises boilerplate)
+    //----------------------------------------------------------
+    auto WarnBad = [&](const char* what)
+        {
+            common->Warning("^4BSE:^1 Invalid %s parameter in '%s' "
+                "(file: %s, line: %d)",
+                what, effect->GetName(),
+                src->GetFileName(), src->GetLineNum());
+        };
 
-		// Initialize sElectricityInfo
-		rvParticleTemplate::sElectricityInfo.mNumForks = 0;
-		rvParticleTemplate::sElectricityInfo.mStatic = true;
-		rvParticleTemplate::sElectricityInfo.mForkSizeMins = idVec3(-20.0, -20.0, -20.0);
-		rvParticleTemplate::sElectricityInfo.mForkSizeMaxs = idVec3(20.0, 20.0, 20.0);
-		rvParticleTemplate::sElectricityInfo.mJitterSize = idVec3(3.0, 7.0, 7.0);
-		rvParticleTemplate::sElectricityInfo.mJitterRate = 0.0;
-		rvParticleTemplate::sElectricityInfo.mJitterTable = declManager->FindTable("halfsintable", false);
+    //----------------------------------------------------------
+    //  Opening brace + first keyword
+    //----------------------------------------------------------
+    if (!src->ExpectTokenString("{"))
+        return false;
 
-		rvParticleTemplate::sDefaultEnvelope.Init();
-		rvParticleTemplate::sDefaultEnvelope.SetDefaultType();
-		rvParticleTemplate::sDefaultEnvelope.mStatic = true;
+    idToken tok;
+    if (!src->ReadToken(&tok))
+        return false;
 
-		rvParticleTemplate::sEmptyEnvelope.Init();
-		rvParticleTemplate::sEmptyEnvelope.mStatic = true;
+    //======================================================================
+    //          1.  POINT  (axis-aligned point or offset)
+    //======================================================================
+    if (!idStr::Icmp(tok, "point"))
+    {
+        p.mSpawnType = vecCount + 8;                           // 1-D/2-D/3-D
+        GetVector(src, vecCount, p.mMins);                   // mins == point
 
-		// Initialize SPF (Spawn Parameter Flags) structures with default values
-		rvParticleParms spfOne1, spfOne2, spfOne3, spfNone0, spfNone1, spfNone3;
+        if (!CheckCommonParms(src, p))
+            WarnBad("point");
+    }
 
-		spfOne1.mRange = 0.0;
-		spfOne1.mMins = idVec3(0.0, 0.0, 0.0);
-		spfOne1.mMaxs = idVec3(0.0, 0.0, 0.0);
-		spfOne1.mSpawnType = 5;
-		spfOne1.mFlags = 0;
-		spfOne1.mModelInfo = 0;
-		spfOne1.mStatic = true;
-		rvParticleTemplate::sSPF_ONE_1 = spfOne1;
+    //======================================================================
+    //          2.  LINE  (pairs of points)
+    //======================================================================
+    else if (!idStr::Icmp(tok, "line"))
+    {
+        p.mSpawnType = vecCount + 12;
+        GetVector(src, vecCount, p.mMins);
+        src->ExpectTokenString(",");
+        GetVector(src, vecCount, p.mMaxs);
 
-		spfOne2.mSpawnType = 6;
-		spfOne2.mFlags = 0;
-		spfOne2.mRange = 0.0;
-		spfOne2.mModelInfo = 0;
-		spfOne2.mMins = idVec3(0.0, 0.0, 0.0);
-		spfOne2.mMaxs = idVec3(0.0, 0.0, 0.0);
-		spfOne2.mStatic = true;
-		rvParticleTemplate::sSPF_ONE_2 = spfOne2;
+        if (!CheckCommonParms(src, p))
+            WarnBad("line");
+    }
 
-		spfOne3.mSpawnType = 7;
-		spfOne3.mFlags = 0;
-		spfOne3.mRange = 0.0;
-		spfOne3.mModelInfo = 0;
-		spfOne3.mMins = idVec3(0.0, 0.0, 0.0);
-		spfOne3.mMaxs = idVec3(0.0, 0.0, 0.0);
-		spfOne3.mStatic = true;
-		rvParticleTemplate::sSPF_ONE_3 = spfOne3;
+    //======================================================================
+    //          3.  BOX  (AABB)
+    //======================================================================
+    else if (!idStr::Icmp(tok, "box"))
+    {
+        p.mSpawnType = vecCount + 16;
+        GetVector(src, vecCount, p.mMins);
+        src->ExpectTokenString(",");
+        GetVector(src, vecCount, p.mMaxs);
 
-		spfNone0.mSpawnType = 0;
-		spfNone0.mFlags = 0;
-		spfNone0.mModelInfo = 0;
-		spfNone0.mRange = 0.0;
-		spfNone0.mMins = idVec3(0.0, 0.0, 0.0);
-		spfNone0.mMaxs = idVec3(0.0, 0.0, 0.0);
-		spfNone0.mStatic = true;
-		rvParticleTemplate::sSPF_NONE_0 = spfNone0;
+        if (!CheckCommonParms(src, p))
+            WarnBad("box");
 
-		spfNone1.mSpawnType = 1;
-		spfNone1.mFlags = 0;
-		spfNone1.mModelInfo = 0;
-		spfNone1.mRange = 0.0;
-		spfNone1.mMins = idVec3(0.0, 0.0, 0.0);
-		spfNone1.mMaxs = idVec3(0.0, 0.0, 0.0);
-		spfNone1.mStatic = true;
-		rvParticleTemplate::sSPF_NONE_1 = spfNone1;
+        // If “surface” flag set – upgrade to “hollow box”
+        if (p.mFlags & 0x01) {
+            p.mSpawnType = vecCount + 20;
+            FixupParms(p);
+        }
+    }
 
-		spfNone3.mSpawnType = 3;
-		spfNone3.mFlags = 0;
-		spfNone3.mModelInfo = 0;
-		spfNone3.mRange = 0.0;
-		spfNone3.mMins = idVec3(0.0, 0.0, 0.0);
-		spfNone3.mMaxs = idVec3(0.0, 0.0, 0.0);
-		spfNone3.mStatic = true;
-		rvParticleTemplate::sSPF_NONE_3 = spfNone3;
-	}
+    //======================================================================
+    //          4.  SPHERE
+    //======================================================================
+    else if (!idStr::Icmp(tok, "sphere"))
+    {
+        p.mSpawnType = vecCount + 24;
+        GetVector(src, vecCount, p.mMins);                   // centre
+        src->ExpectTokenString(",");
+        GetVector(src, vecCount, p.mMaxs);                   // radii per-axis
+
+        if (!CheckCommonParms(src, p))
+            WarnBad("sphere");
+
+        if (p.mFlags & 0x01) {          // surface == “shell”
+            p.mSpawnType = vecCount + 28;
+            FixupParms(p);
+        }
+    }
+
+    //======================================================================
+    //          5.  CYLINDER
+    //======================================================================
+    else if (!idStr::Icmp(tok, "cylinder"))
+    {
+        p.mSpawnType = vecCount + 32;
+        GetVector(src, vecCount, p.mMins);                   // base
+        src->ExpectTokenString(",");
+        GetVector(src, vecCount, p.mMaxs);                   // top
+
+        if (!CheckCommonParms(src, p))
+            WarnBad("cylinder");
+
+        if (p.mFlags & 0x01) {          // surface only
+            p.mSpawnType = vecCount + 36;
+            FixupParms(p);
+        }
+    }
+
+    //======================================================================
+    //          6.  SPIRAL  (mins / maxs / pitch)
+    //======================================================================
+    else if (!idStr::Icmp(tok, "spiral"))
+    {
+        p.mSpawnType = vecCount + 40;
+        GetVector(src, vecCount, p.mMins);
+        src->ExpectTokenString(",");
+        GetVector(src, vecCount, p.mMaxs);
+        src->ExpectTokenString(",");
+        p.mRange = src->ParseFloat();                          // pitch Δ
+
+        if (!CheckCommonParms(src, p))
+            WarnBad("spiral");
+
+        FixupParms(p);   // surfaces always collapse to SCALE variants
+    }
+
+    //======================================================================
+    //          7.  MODEL  (arbitrary mesh sampling)
+    //======================================================================
+    else if (!idStr::Icmp(tok, "model"))
+    {
+        p.mSpawnType = vecCount + 44;
+
+        // model name
+        src->ReadToken(&tok);
+        idRenderModel* mdl = renderModelManager->FindModel(tok);
+
+        if (mdl->NumSurfaces() == 0) {
+            common->Warning("^4BSE:^1 No surfaces in model '%s' "
+                "– falling back to _default",
+                tok.c_str());
+            mdl = renderModelManager->FindModel("_default");
+        }
+        p.mMisc = mdl;
+
+        // mins / maxs
+        src->ExpectTokenString(",");
+        GetVector(src, vecCount, p.mMins);
+        src->ExpectTokenString(",");
+        GetVector(src, vecCount, p.mMaxs);
+
+        if (!CheckCommonParms(src, p))
+            WarnBad("model");
+    }
+
+    //======================================================================
+    //          8.  Unknown keyword
+    //======================================================================
+    else {
+        common->Warning("^4BSE:^1 Unknown spawn keyword '%s' in '%s' "
+            "(file: %s, line: %d)",
+            tok.c_str(), effect->GetName(),
+            src->GetFileName(), src->GetLineNum());
+        src->SkipBracedSection(true);
+        return false;
+    }
+
+    //----------------------------------------------------------------------
+    //  Canonicalise for fast runtime use
+    //----------------------------------------------------------------------
+    FixupParms(p);
+    return true;
 }
-void rvParticleTemplate::Init() {
-	idVec3 vec3_zero;
-	vec3_zero.Zero();
 
-	// Initialize static configurations if not already done.
-	InitStatic();
-
-	// Reset all member variables to default states.
-	mFlags = 0x4000000u | 0x8000000u; // Assuming these flags are default states.
-	mType = 0;
-	SetMaterial((idMaterial *)declManager->FindMaterial("_default"));
-	mModel = renderModelManager->FindModel("_default");
-
-	// Initialize simple numerical members with default values.
-	mTraceModelIndex = -1;
-	mGravity = idVec2(0, 0);
-	mTiling = 8.0f;
-	mPhysicsDistance = 0.0f;
-	mBounce = 0.0f;
-	mDuration = idVec2(0.0020000001f, 0.0020000001f);
-	mCentre = vec3_zero;
-
-	// Pointers to parameter defaults.
-	mpSpawnPosition = mpSpawnDirection = mpSpawnVelocity = mpSpawnAcceleration = mpSpawnFriction =
-		mpSpawnRotate = mpSpawnAngle = mpSpawnOffset = mpSpawnLength = mpDeathTint = mpDeathRotate =
-		mpDeathAngle = mpDeathOffset = mpDeathLength = &rvParticleTemplate::sSPF_NONE_3;
-
-	// Other initializations.
-	mNumSizeParms = 2;
-	mNumRotateParms = 1;
-	mVertexCount = 4;
-	mIndexCount = 6;
-	mTrailInfo = &rvParticleTemplate::sTrailInfo;
-	mElecInfo = &rvParticleTemplate::sElectricityInfo;
-
-	// Default parameter pointers.
-	mpSpawnTint = mpSpawnFade = mpSpawnSize = &rvParticleTemplate::sSPF_ONE_3;
-	mpSpawnWindStrength = &rvParticleTemplate::sSPF_NONE_1;
-	mpTintEnvelope = mpFadeEnvelope = mpSizeEnvelope = mpRotateEnvelope = mpAngleEnvelope = mpOffsetEnvelope = mpLengthEnvelope = &rvParticleTemplate::sEmptyEnvelope;
-
-	mpDeathFade = &rvParticleTemplate::sSPF_NONE_1;
-	mpDeathSize = &rvParticleTemplate::sSPF_ONE_3;
-
-	mTrailRepeat = 1;
-	mNumFrames = mNumImpactEffects = mNumTimeoutEffects = 0;
-}
-
-void rvParticleTemplate::SetParameterCounts() {
-	static const std::map<int, std::pair<int, int>> typeMappings = {
-		{1, {2, 1}},
-		{2, {1, 0}},
-		{7, {1, 0}},
-		{8, {1, 0}},
-		{9, {1, 0}},
-		{3, {2, 3}},
-		{4, {3, 1}},
-		{5, {3, 3}},
-		{6, {3, 0}},
-		{0xA, {0, 3}}
-	};
-
-	auto it = typeMappings.find(mType);
-	if (it != typeMappings.end()) {
-		mNumSizeParms = it->second.first;
-		mNumRotateParms = it->second.second;
-	}
-
-	// Set default parameter pointers based on size and rotate params.
-	mpSpawnSize = (mNumSizeParms > 1) ? &rvParticleTemplate::sSPF_ONE_3 : &rvParticleTemplate::sSPF_ONE_1;
-	mpSpawnRotate = (mNumRotateParms > 0) ? &rvParticleTemplate::sSPF_NONE_3 : &rvParticleTemplate::sSPF_NONE_0;
-	mpDeathSize = mpSpawnSize;
-	mpDeathRotate = mpSpawnRotate;
-}
-
-void rvParticleTemplate::PurgeTraceModel(void) {
-	if (mTraceModelIndex != -1) {
-		// bse->FreeTraceModel(mTraceModelIndex); // Assuming this is a function call to release the model.
-		mTraceModelIndex = -1;
-	}
-}
-
-void rvParticleTemplate::Purge() {
-	// TODO
-}
-
-float rvParticleTemplate::CostTrail(float cost) const
+// ==========================================================================
+//  1.  SPAWN-DOMAIN BLOCK
+// ==========================================================================
+bool rvParticleTemplate::ParseSpawnDomains(rvDeclEffect* effect,
+    idLexer* src)
 {
-	const rvTrailInfo* info = mTrailInfo;
-	switch (info->mTrailType) {
-		case 1: return info->mTrailCount.y * (cost * 2);
-		case 2: return info->mTrailCount.y * (cost * 1.5f) + 20.0f;
-		default: 
-			return cost;
-	}
+    if (!src->ExpectTokenString("{"))
+        return false;
+
+    idToken tok;
+    while (src->ReadToken(&tok)) {
+
+        if (!idStr::Cmp(tok, "}"))
+            break;
+
+        //----------------------------------------------------------
+        //  Dispatch – every keyword maps to one rvParticleParms slot
+        //----------------------------------------------------------
+        if (!idStr::Icmp(tok, "position")) ParseSpawnParms(effect, src, mSpawnPosition, 3);
+        else if (!idStr::Icmp(tok, "direction")) {
+            ParseSpawnParms(effect, src, mSpawnDirection, 3);
+            mFlags |= 0x00000040;      /* marks “hasDir” */
+        }
+        else if (!idStr::Icmp(tok, "velocity")) ParseSpawnParms(effect, src, mSpawnVelocity, 3);
+        else if (!idStr::Icmp(tok, "acceleration")) ParseSpawnParms(effect, src, mSpawnAcceleration, 3);
+        else if (!idStr::Icmp(tok, "friction")) ParseSpawnParms(effect, src, mSpawnFriction, 3);
+        else if (!idStr::Icmp(tok, "tint")) ParseSpawnParms(effect, src, mSpawnTint, 3);
+        else if (!idStr::Icmp(tok, "fade")) ParseSpawnParms(effect, src, mSpawnFade, 1);
+        else if (!idStr::Icmp(tok, "size")) ParseSpawnParms(effect, src, mSpawnSize, mNumSizeParms);
+        else if (!idStr::Icmp(tok, "rotate")) ParseSpawnParms(effect, src, mSpawnRotate, mNumRotateParms);
+        else if (!idStr::Icmp(tok, "angle")) ParseSpawnParms(effect, src, mSpawnAngle, 3);
+        else if (!idStr::Icmp(tok, "offset")) ParseSpawnParms(effect, src, mSpawnOffset, 3);
+        else if (!idStr::Icmp(tok, "length")) ParseSpawnParms(effect, src, mSpawnLength, 3);
+        else {
+            common->Warning("^4BSE:^1 Invalid spawn keyword '%s' in '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(), effect->GetName(),
+                src->GetFileName(), src->GetLineNum());
+            src->SkipBracedSection(true);
+        }
+    }
+    return true;
 }
 
-bool rvParticleTemplate::UsesEndOrigin(void) {
-	return (mpSpawnPosition->mFlags & 2) || (mpSpawnLength->mFlags & 2) || ((mFlags >> 22) & 1);
+
+// ==========================================================================
+//  2.  DEATH-DOMAIN BLOCK   (plus automatic envelope fallbacks)
+// ==========================================================================
+bool rvParticleTemplate::ParseDeathDomains(rvDeclEffect* effect,
+    idLexer* src)
+{
+    if (!src->ExpectTokenString("{"))
+        return false;
+
+    idToken tok;
+    while (src->ReadToken(&tok)) {
+
+        if (!idStr::Cmp(tok, "}"))
+            break;
+
+        auto SetDefaultEnv = [](rvEnvParms& env) { env.SetDefaultType(); };
+
+        if (!idStr::Icmp(tok, "tint")) { ParseSpawnParms(effect, src, mDeathTint, 3); SetDefaultEnv(mTintEnvelope); }
+        else if (!idStr::Icmp(tok, "fade")) { ParseSpawnParms(effect, src, mDeathFade, 1); SetDefaultEnv(mFadeEnvelope); }
+        else if (!idStr::Icmp(tok, "size")) { ParseSpawnParms(effect, src, mDeathSize, mNumSizeParms); SetDefaultEnv(mSizeEnvelope); }
+        else if (!idStr::Icmp(tok, "rotate")) { ParseSpawnParms(effect, src, mDeathRotate, mNumRotateParms); SetDefaultEnv(mRotateEnvelope); }
+        else if (!idStr::Icmp(tok, "angle")) { ParseSpawnParms(effect, src, mDeathAngle, 3); SetDefaultEnv(mAngleEnvelope); }
+        else if (!idStr::Icmp(tok, "offset")) { ParseSpawnParms(effect, src, mDeathOffset, 3); SetDefaultEnv(mOffsetEnvelope); }
+        else if (!idStr::Icmp(tok, "length")) { ParseSpawnParms(effect, src, mDeathLength, 3); SetDefaultEnv(mLengthEnvelope); }
+        else {
+            common->Warning("^4BSE:^1 Invalid end keyword '%s' in '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(), effect->GetName(),
+                src->GetFileName(), src->GetLineNum());
+            src->SkipBracedSection(true);
+        }
+    }
+    return true;
+}
+
+
+// ==========================================================================
+//  3.  IMPACT BLOCK     (bounce / remove / effect)
+// ==========================================================================
+bool rvParticleTemplate::ParseImpact(rvDeclEffect* effect,
+    idLexer* src)
+{
+    if (!src->ExpectTokenString("{"))
+        return false;
+
+    mFlags |= 0x00000002;     // “hasImpact” bit
+
+    idToken tok;
+    while (src->ReadToken(&tok)) {
+
+        if (!idStr::Cmp(tok, "}"))
+            break;
+
+        if (!idStr::Icmp(tok, "effect"))            // ----- effect list
+        {
+            src->ReadToken(&tok);                     // grab effect name
+            if (mNumImpactEffects >= 4) {
+                common->Warning("^4BSE:^1 Too many impact effects '%s' in '%s' "
+                    "(file: %s, line: %d)",
+                    tok.c_str(), effect->GetName(),
+                    src->GetFileName(), src->GetLineNum());
+            }
+            else {
+                mImpactEffects[mNumImpactEffects++] =
+                    declManager->FindEffect(tok, false);
+            }
+        }
+        else if (!idStr::Icmp(tok, "remove"))       // ----- remove flag
+        {
+            const bool remove = src->ParseInt() != 0;
+            if (remove) mFlags |= 0x00000004; else mFlags &= ~0x00000004;
+        }
+        else if (!idStr::Icmp(tok, "bounce"))       // ----- elasticity
+        {
+            mBounce = src->ParseFloat();
+        }
+        else                                            // ----- unknown key
+        {
+            common->Warning("^4BSE:^1 Invalid impact keyword '%s' in '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(), effect->GetName(),
+                src->GetFileName(), src->GetLineNum());
+            src->SkipBracedSection(true);
+        }
+    }
+    return true;
+}
+
+
+// ==========================================================================
+//  4.  TIMEOUT BLOCK    (effect list only)
+// ==========================================================================
+bool rvParticleTemplate::ParseTimeout(rvDeclEffect* effect,
+    idLexer* src)
+{
+    if (!src->ExpectTokenString("{"))
+        return false;
+
+    idToken tok;
+    while (src->ReadToken(&tok)) {
+
+        if (!idStr::Cmp(tok, "}"))
+            break;
+
+        if (idStr::Icmp(tok, "effect")) {
+            common->Warning("^4BSE:^1 Invalid timeout keyword '%s' in '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(), effect->GetName(),
+                src->GetFileName(), src->GetLineNum());
+            src->SkipBracedSection(true);
+            continue;
+        }
+
+        src->ReadToken(&tok);                   // effect name
+        if (mNumTimeoutEffects >= 4) {
+            common->Warning("^4BSE:^1 Too many timeout effects '%s' in '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(), effect->GetName(),
+                src->GetFileName(), src->GetLineNum());
+        }
+        else {
+            mTimeoutEffects[mNumTimeoutEffects++] =
+                declManager->FindEffect(tok, false);
+        }
+    }
+    return true;
+}
+
+
+// ==========================================================================
+//  5.  BLEND-MODE PARSER  (currently only “add” is recognised)
+// ==========================================================================
+bool rvParticleTemplate::ParseBlendParms(rvDeclEffect* effect,
+    idLexer* src)
+{
+    idToken tok;
+    if (!src->ReadToken(&tok))
+        return false;
+
+    if (!idStr::Icmp(tok, "add")) {
+        mFlags |= 0x00000080;       // additive flag
+    }
+    else {
+        common->Warning("^4BSE:^1 Invalid blend type '%s' in '%s' "
+            "(file: %s, line: %d)",
+            tok.c_str(), effect->GetName(),
+            src->GetFileName(), src->GetLineNum());
+    }
+    return true;
+}
+
+/* ========================================================================
+   1.  Deep-equality check
+   ======================================================================== */
+bool rvParticleTemplate::Compare(const rvParticleTemplate& rhs) const {
+
+    /* ------------------------------------------------------------
+       Cheap tests first – bitfields, type, durations, material etc.
+       ------------------------------------------------------------ */
+    if (mFlags != rhs.mFlags ||
+        mType != rhs.mType ||
+        mDuration != rhs.mDuration ||
+        idStr::Cmp(mMaterialName, rhs.mMaterialName) ||
+        idStr::Cmp(mModelName, rhs.mModelName) ||
+        mGravity != rhs.mGravity ||
+        !idMath::Fabs(mBounce - rhs.mBounce) < idMath::FLT_EPSILON ||
+        mNumSizeParms != rhs.mNumSizeParms ||
+        mNumRotateParms != rhs.mNumRotateParms ||
+        mVertexCount != rhs.mVertexCount ||
+        mIndexCount != rhs.mIndexCount)
+        return false;
+
+    /* ------------------------------------------------------------
+       Spawn domains (vector compare helpers already exist)
+       ------------------------------------------------------------ */
+    auto TintEqual = [](const rvParticleParms& a,
+        const rvParticleParms& b)
+        {
+            auto C = [](float f) { return static_cast<int>(f * 255.0f); };
+            return C(a.mMins.x) == C(b.mMins.x) && C(a.mMins.y) == C(b.mMins.y) &&
+                C(a.mMins.z) == C(b.mMins.z) && C(a.mMaxs.x) == C(b.mMaxs.x) &&
+                C(a.mMaxs.y) == C(b.mMaxs.y) && C(a.mMaxs.z) == C(b.mMaxs.z) &&
+                a.mSpawnType == b.mSpawnType && a.mFlags == b.mFlags;
+        };
+
+    if (mSpawnPosition != rhs.mSpawnPosition ||
+        mSpawnVelocity != rhs.mSpawnVelocity ||
+        mSpawnAcceleration != rhs.mSpawnAcceleration ||
+        mSpawnFriction != rhs.mSpawnFriction ||
+        mSpawnDirection != rhs.mSpawnDirection ||
+        !TintEqual(mSpawnTint, rhs.mSpawnTint) ||
+        mSpawnFade != rhs.mSpawnFade ||
+        mSpawnSize != rhs.mSpawnSize ||
+        mSpawnRotate != rhs.mSpawnRotate ||
+        mSpawnAngle != rhs.mSpawnAngle ||
+        mSpawnOffset != rhs.mSpawnOffset ||
+        mSpawnLength != rhs.mSpawnLength)
+    {
+        return false;
+    }
+
+    /* ------------------------------------------------------------
+       Death domains are compared only when the envelope is active
+       ------------------------------------------------------------ */
+    auto DeathNeeds = [](const rvEnvParms& e) { return e.GetType() > 0; };
+
+    if (DeathNeeds(mTintEnvelope) && !TintEqual(mDeathTint, rhs.mDeathTint))   return false;
+    if (DeathNeeds(mFadeEnvelope) && (mDeathFade != rhs.mDeathFade))         return false;
+    if (DeathNeeds(mSizeEnvelope) && (mDeathSize != rhs.mDeathSize))         return false;
+    if (DeathNeeds(mRotateEnvelope) && (mDeathRotate != rhs.mDeathRotate))       return false;
+    if (DeathNeeds(mAngleEnvelope) && (mDeathAngle != rhs.mDeathAngle))        return false;
+    if (DeathNeeds(mOffsetEnvelope) && (mDeathOffset != rhs.mDeathOffset))       return false;
+    if (DeathNeeds(mLengthEnvelope) && (mDeathLength != rhs.mDeathLength))       return false;
+
+
+    /* ------------------------------------------------------------
+       Impact / timeout effect arrays
+       ------------------------------------------------------------ */
+    if (mNumImpactEffects != rhs.mNumImpactEffects ||
+        mNumTimeoutEffects != rhs.mNumTimeoutEffects)
+        return false;
+
+    for (int i = 0; i < mNumImpactEffects; ++i)
+        if (mImpactEffects[i] != rhs.mImpactEffects[i])
+            return false;
+
+    for (int i = 0; i < mNumTimeoutEffects; ++i)
+        if (mTimeoutEffects[i] != rhs.mTimeoutEffects[i])
+            return false;
+
+    /* ------------------------------------------------------------
+       Envelope bodies
+       ------------------------------------------------------------ */
+    if (mRotateEnvelope != rhs.mRotateEnvelope ||
+        mSizeEnvelope != rhs.mSizeEnvelope ||
+        mFadeEnvelope != rhs.mFadeEnvelope ||
+        mTintEnvelope != rhs.mTintEnvelope ||
+        mAngleEnvelope != rhs.mAngleEnvelope ||
+        mOffsetEnvelope != rhs.mOffsetEnvelope ||
+        mLengthEnvelope != rhs.mLengthEnvelope)
+    {
+        return false;
+    }
+
+    /* ------------------------------------------------------------
+       Trail data
+       ------------------------------------------------------------ */
+    if (mTrailType != rhs.mTrailType)
+        return false;
+
+    switch (mTrailType)
+    {
+    case 0: break;
+    case 1: // burn
+    case 2: // motion
+        if (mTrailTime != rhs.mTrailTime || mTrailCount != rhs.mTrailCount)
+            return false;
+        break;
+    case 3: // custom
+        if (idStr::Cmp(mTrailTypeName, rhs.mTrailTypeName))
+            return false;
+        break;
+    }
+    return true;
+}
+
+
+
+/* ========================================================================
+   2.  Finish() – post-parse sanity passes & derived-data setup
+   ======================================================================== */
+void rvParticleTemplate::Finish(void)
+{
+    mFlags |= 0x0001;                     // “parsed” bit
+
+    /* --------------------------------------------------------------------
+       2-A  trail sanitiser
+       -------------------------------------------------------------------- */
+    if (mTrailType == 0 || mTrailType == 3) {
+        mTrailTime.Zero();
+        mTrailCount.Zero();
+    }
+
+    /* --------------------------------------------------------------------
+       2-B  vertex / index budgets by particle type
+       -------------------------------------------------------------------- */
+    switch (mType)
+    {
+        /* billboards / beams / ribbons / decals ................................ */
+    case 1: case 2: case 4: case 6: case 8:
+        mVertexCount = 4;
+        mIndexCount = 6;
+        if (mTrailType == 1 && mTrailCount.y > 0.0f) {
+            const int maxTrail = GetMaxTrailCount();
+            mVertexCount *= maxTrail;
+            mIndexCount *= maxTrail;
+        }
+        break;
+
+        /* ribbon-extruded mesh .................................................. */
+    case 5: {
+        // grab first surface of model for vert/idx counts and material
+        idRenderModel* mdl = renderModelManager->FindModel(mModelName);
+        if (mdl->NumSurfaces())
+        {
+            const modelSurface_t * s = mdl->Surface(0);
+            const srfTriangles_t* tri = s->geometry;
+            mVertexCount = tri ? tri->numVerts : s->geometry->numVerts;
+            mIndexCount = tri ? tri->numIndexes : s->geometry->numIndexes;
+            mMaterial = s->shader;
+            mMaterialName = mMaterial->GetName();
+        }
+
+        /* generate AABB trace-model for ribbon collisions */
+        idBounds box;
+        mdl->GetBounds(box);
+        auto* tm = new idTraceModel;
+        tm->InitBox();
+        tm->SetupBox(box);
+        mTraceModelIndex = bseLocal.traceModels.Append(tm);
+        break;
+    }
+
+          /* forked sprite ........................................................ */
+    case 7:
+        mVertexCount = 4 * (5 * mNumForks + 5);
+        mIndexCount = 60 * (mNumForks + 1);
+        break;
+
+        /* glare helper .......................................................... */
+    case 9:
+        mVertexCount = mIndexCount = 0;
+        break;
+
+    default:
+        mVertexCount = 0; mIndexCount = 0;          // should not occur
+    }
+
+    /* --------------------------------------------------------------------
+       2-C  clamp & sort min/max ranges
+       -------------------------------------------------------------------- */
+    float y;
+    if (this->mDuration.x >= (double)this->mDuration.y)
+    {
+        y = this->mDuration.y;
+        this->mDuration.y = this->mDuration.x;
+        this->mDuration.x = y;
+    }
+    if (this->mGravity.x >= (double)this->mGravity.y)
+    {
+        y = this->mGravity.y;
+        this->mGravity.y = this->mGravity.x;
+        this->mGravity.x = y;
+    }
+    if (this->mTrailTime.x >= (double)this->mTrailTime.y)
+    {
+        y = this->mTrailTime.y;
+        this->mTrailTime.y = this->mTrailTime.x;
+        this->mTrailTime.x = y;
+    }
+    if (this->mTrailCount.x >= (double)this->mTrailCount.y)
+    {
+        y = this->mTrailCount.y;
+        this->mTrailCount.y = this->mTrailCount.x;
+        this->mTrailCount.x = y;
+    }
+
+    /* --------------------------------------------------------------------
+       2-D  pre-compute the spawn-centre for helpers that need it
+       -------------------------------------------------------------------- */
+    if (!(mFlags & 0x1000)) {
+        switch (mSpawnPosition.mSpawnType)
+        {
+        case 0x0B:                               // explicit point
+            mCentre = mSpawnPosition.mMins;
+            break;
+
+        case 0x0F: case 0x13: case 0x17:         // boxes
+        case 0x1B: case 0x1F: case 0x23:
+        case 0x27: case 0x2B: case 0x2F:
+            mCentre = (mSpawnPosition.mMaxs + mSpawnPosition.mMins) * 0.5f;
+            break;
+
+        default: break;                          // others treat centre ≡ 0
+        }
+    }
+}
+
+
+
+/* ========================================================================
+   3.  Parse() – master lexer loop
+   ======================================================================== */
+bool rvParticleTemplate::Parse(rvDeclEffect* effect, idLexer* src)
+{
+    if (!src->ExpectTokenString("{"))
+        return false;
+
+    idToken tok;
+    while (src->ReadToken(&tok))
+    {
+        if (!idStr::Cmp(tok, "}"))
+            break;
+
+        /* ----------------------------------------------------------------
+           Hand each keyword to its mini-parser or immediate setter
+           ---------------------------------------------------------------- */
+        if (!idStr::Icmp(tok, "start"))      ParseSpawnDomains(effect, src);
+        else if (!idStr::Icmp(tok, "end"))      ParseDeathDomains(effect, src);
+        else if (!idStr::Icmp(tok, "motion"))      ParseMotionDomains(effect, src);
+
+        /*  generated* flags ------------------------------------------------*/
+        else if (!idStr::Icmp(tok, "generatedNormal")) mFlags |= 0x0100;
+        else if (!idStr::Icmp(tok, "generatedOriginNormal")) mFlags |= 0x0200;
+        else if (!idStr::Icmp(tok, "flipNormal")) mFlags |= 0x0400;
+        else if (!idStr::Icmp(tok, "generatedLine")) mFlags |= 0x0800;
+
+        /*  persist / tiling / duration / gravity -------------------------- */
+        else if (!idStr::Icmp(tok, "persist"))  mFlags |= 0x2000;
+
+        else if (!idStr::Icmp(tok, "tiling")) {
+            mFlags |= 0x1000;
+            mTiling = idMath::ClampFloat(0.002f, 1024.f, src->ParseFloat());
+        }
+        else if (!idStr::Icmp(tok, "duration")) {
+            mDuration.x = idMath::ClampFloat(0.002f, 60.f, src->ParseFloat());
+            src->ExpectTokenString(",");
+            mDuration.y = idMath::ClampFloat(0.002f, 60.f, src->ParseFloat());
+        }
+        else if (!idStr::Icmp(tok, "gravity")) {
+            mGravity.x = src->ParseFloat();  src->ExpectTokenString(",");
+            mGravity.y = src->ParseFloat();
+        }
+
+        /*  trail section --------------------------------------------------- */
+        else if (!idStr::Icmp(tok, "trailType"))
+        {
+            src->ReadToken(&tok);
+            if (!idStr::Icmp(tok, "burn")) mTrailType = 1;
+            else if (!idStr::Icmp(tok, "motion")) mTrailType = 2;
+            else { mTrailType = 3;  mTrailTypeName = tok; }
+        }
+        else if (!idStr::Icmp(tok, "trailMaterial")) {
+            src->ReadToken(&tok);
+            mTrailMaterial = declManager->FindMaterial(tok, false);
+            mTrailMaterialName = tok;
+        }
+        else if (!idStr::Icmp(tok, "trailTime")) {
+            mTrailTime.x = src->ParseFloat();  src->ExpectTokenString(",");
+            mTrailTime.y = src->ParseFloat();
+        }
+        else if (!idStr::Icmp(tok, "trailCount")) {
+            mTrailCount.x = src->ParseFloat(); src->ExpectTokenString(",");
+            mTrailCount.y = src->ParseFloat();
+        }
+
+        /*  material / entityDef / fork etc. ------------------------------- */
+        else if (!idStr::Icmp(tok, "material")) {
+            src->ReadToken(&tok);
+            mMaterial = declManager->FindMaterial(tok, true);
+            mMaterialName = tok;
+        }
+        else if (!idStr::Icmp(tok, "entityDef")) {
+            src->ReadToken(&tok);
+            mEntityDefName = tok;
+            // warm-cache its dict if it exists
+            if (const idDecl* d = declManager->FindType(DECL_ENTITYDEF,
+                mEntityDefName,
+                false))
+                game->CacheDictionaryMedia(static_cast<const idDict&>(d[1]));
+        }
+        else if (!idStr::Icmp(tok, "fork")) {
+            mNumForks = idMath::ClampInt(0, 16, src->ParseInt());
+        }
+        else if (!idStr::Icmp(tok, "forkMins")) GetVector(src, 3, mForkSizeMins);
+        else if (!idStr::Icmp(tok, "forkMaxs")) GetVector(src, 3, mForkSizeMaxs);
+        else if (!idStr::Icmp(tok, "jitterSize")) GetVector(src, 3, mJitterSize);
+        else if (!idStr::Icmp(tok, "jitterRate")) mJitterRate = src->ParseFloat();
+        else if (!idStr::Icmp(tok, "jitterTable")) {
+            src->ReadToken(&tok);
+            const idDeclTable* t = declManager->FindType<idDeclTable>(tok, true);
+            if (!t->IsImplicit()) mJitterTable = t;
+        }
+
+        /*  blend / shadow / specular flags -------------------------------- */
+        else if (!idStr::Icmp(tok, "blend")) ParseBlendParms(effect, src);
+        else if (!idStr::Icmp(tok, "shadows")) mFlags |= 0x020000;
+        else if (!idStr::Icmp(tok, "specular")) mFlags |= 0x040000;
+
+        /*  model-specific (ribbon-extrude) -------------------------------- */
+        else if (!idStr::Icmp(tok, "model")) {
+            src->ReadToken(&tok);
+            mModelName = tok;
+
+            if (renderModelManager->FindModel(tok)->NumSurfaces() == 0) {
+                mModelName = "_default";
+                common->Warning("^4BSE:^1 Model '%s' has no surfaces – using _default",
+                    tok.c_str());
+            }
+        }
+
+        /*  impact / timeout blocks ---------------------------------------- */
+        else if (!idStr::Icmp(tok, "impact")) ParseImpact(effect, src);
+        else if (!idStr::Icmp(tok, "timeout")) ParseTimeout(effect, src);
+
+        /*  unknown keyword ------------------------------------------------- */
+        else {
+            common->Warning("^4BSE:^1 Invalid particle keyword '%s' in '%s' "
+                "(file: %s, line: %d)",
+                tok.c_str(), effect->GetName(),
+                src->GetFileName(), src->GetLineNum());
+            src->SkipBracedSection(true);
+        }
+    }
+
+    /* --------------------------------------------------------------------
+       Final consistency pass
+       -------------------------------------------------------------------- */
+    Finish();
+    return true;
 }

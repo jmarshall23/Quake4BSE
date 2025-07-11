@@ -1,215 +1,103 @@
-// Copyright (C) 2007 Id Software, Inc.
-//
+﻿// helper ----------------------------------------------------------------------
+inline float TableSample(const idDeclTable* tbl, float x)
+{
+    // idTech tables take the argument as a float, but are implemented through a
+    // generated thunk (`TableLookup`).  Wrap it so we can call it like a normal
+    // function.
+    return tbl ? static_cast<float>(tbl->TableLookup(*reinterpret_cast<const int*>(&x))) : 0.0f;
+}
 
-
-#ifndef _BSE_ENVELOPE_H_INC_
-#define _BSE_ENVELOPE_H_INC_
-
-extern const char sdPoolAllocator_rvEnvParms[];
-class rvEnvParms //: public sdPoolAllocator< rvEnvParms, sdPoolAllocator_rvEnvParms, 128 >
+// ============================================================================
+//  Base class ‒ only common metadata lives here
+// ============================================================================
+class rvEnvParms
 {
 public:
-	friend	class		rvEnvParms1;
-	friend	class		rvEnvParms2;
-	friend	class		rvEnvParms3;
+    // --------------------------------------------------------------------- //
+    //  Meta helpers
+    // --------------------------------------------------------------------- //
+    bool operator!=(const rvEnvParms& rhs) const { return !Compare(rhs); }
+    int  GetType()              const;
+    bool GetMinMax(float& lo, float& hi) const;
+    void SetDefaultType();                 // choose “linear” table if none set
+    void Init();                           // zero-init to sane defaults
 
-						rvEnvParms( void ) : mStatic(0), mFastLookUp(0) {}
-						rvEnvParms( const rvEnvParms &copy ) { *this = copy; }
-						~rvEnvParms( void ) {}
-	
-			void		SetDefaultType( void );
-		//	void		SetType( const char *type ) { mTable = declHolder.declTableType.LocalFind( type ); }
-			void		SetType( const idDeclTable *tabl ) { mTable = tabl; }
+    /*  Calculate `rate[]` for N channels.
+        – If `mIsCount`  :  rate[i] = src[i] / duration
+        – If !mIsCount   :  rate[i] = src[i]              */
+    void CalcRate(float* outRate, float duration, int count,
+        const float* srcRate) const;
 
-			idVec3		&GetOffsetRef( void ) { return( mEnvOffset ); }
-			const idVec3 &GetOffsetRef( void ) const { return( mEnvOffset ); }
-			idVec3		&GetRateRef( void ) { return( mRate ); }
-			const idVec3 &GetRateRef( void ) const { return( mRate ); }
-			const idDeclTable *GetType( void ) const { return mTable; }
-			void		SetIsCount( bool isCount ) { mIsCount = isCount; }
+    /*  Generic 3-channel evaluator – utility for derived Evaluate().        */
+    void Evaluate3(float time,
+        const float* start,
+        const float* rate,
+        const float* end,
+        float* dest) const;
 
-			bool		GetIsCount( void ) const { return( mIsCount != 0 ); }
-			void		CalcRate( float *rate, float duration, int count );
-
-			void		Init( void );
-			bool		GetMinMax( float &min, float &max );
-
-			void		Evaluate3( const float time, const float *start, const float *rate, const float *end, float *dest );
-			void		Evaluate( class rvEnvParms1Particle &env, float time, float oneOverDuration, float *v );
-			void		Evaluate( class rvEnvParms2Particle &env, float time, float oneOverDuration, float *v );
-			void		Evaluate( class rvEnvParms3Particle &env, float time, float oneOverDuration, float *v );
-
-			void		operator=	( const rvEnvParms &copy );
-			bool		operator==	( const rvEnvParms &comp ) const { return( Compare( comp ) ); }
-			bool		operator!=	( const rvEnvParms &comp ) const { return( !Compare( comp ) ); }
-
-			void		Finalize( void );
-			void		ClearFast( void ) { mFastLookUp = false; }
+    idVec3 mEnvOffset;
+    idVec3 mRate;
+protected:
+    bool Compare(const rvEnvParms& rhs) const;
 
 public:
-			bool		Compare( const rvEnvParms &comp ) const;
-
-	const	idDeclTable	*mTable;
-			short		mIsCount;
-public:
-			byte		mStatic;
-			byte		mFastLookUp;
-//private:
-			idVec3		mEnvOffset;
-			idVec3		mRate;
+    const idDeclTable* mTable = nullptr; // lookup curve/table
+    bool               mIsCount = true;    // if true, mRate* is “count” not “Hz”
 };
 
-class rvEnvParms1
+// ============================================================================
+//  1-D variant
+// ============================================================================
+class rvEnvParms1 : public rvEnvParms
 {
 public:
-	friend	class		rvEnvParms;
+    // life-cycle
+    void Init(const rvEnvParms& src, float duration);
 
-						rvEnvParms1( void ) {}
-						~rvEnvParms1( void ) {}
+    // per-frame evaluate
+    void Evaluate(float time, float* dest) const;
 
-			void		Init( const rvEnvParms & copy, float duration );
-			void		Evaluate( const float time, float *dest );
-
-			float		*GetStart( void ) { return( &mStart ); }
-			float		*GetEnd( void ) { return( &mEnd ); }
-
-			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
-			void		Transform( const idVec3 normal ) {}
-			void		Rotate( const rvAngles &angles );
-public:
-	const	idDeclTable	*mTable;
-			float		mEnvOffset;
-
-			float		mStart;
-			float		mRate;
-			float		mEnd;
+    // data
+    float mStart = 0.0f;
+    float mEnd = 0.0f;
 };
 
-class rvEnvParms2
+// ============================================================================
+//  2-D variant
+// ============================================================================
+class rvEnvParms2 : public rvEnvParms
 {
 public:
-	friend	class		rvEnvParms;
+    void  Init(const rvEnvParms& src, float duration);
+    void  Evaluate(float time, float* dest) const;
 
-						rvEnvParms2( void ) {}
-						~rvEnvParms2( void ) {}
-
-			void		Init( const rvEnvParms & copy, float duration );
-			void		Evaluate( const float time, float *dest );
-
-			float		*GetStart( void ) { return( mStart.ToFloatPtr() ); }
-			float		*GetEnd( void ) { return( mEnd.ToFloatPtr() ); }
-
-			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
-			void		Transform( const idVec3 normal ) {}
-			void		Rotate( const rvAngles &angles );
-public:
-	const	idDeclTable	*mTable;
-			idVec2		mEnvOffset;
-
-			bool		mFastLookup;
-			idVec2		mStart;
-			idVec2		mRate;
-			idVec2		mEnd;
+    idVec2 mStart = vec2_origin;
+    idVec2 mEnd = vec2_origin;
+    idVec2 mRate = idVec2(1.0f, 1.0f);
+    idVec2 mEnvOffset = idVec2_zero;
+    bool   mFixedRateAndOffset = false;
 };
 
-class rvEnvParms3
+// ============================================================================
+//  3-D variant  (already had Scale / Transform earlier)
+// ============================================================================
+class rvEnvParms3 : public rvEnvParms
 {
 public:
-	friend	class		rvEnvParms;
+    // life-cycle
+    void Init(const rvEnvParms& src, float duration);
 
-						rvEnvParms3( void ) {}
-						~rvEnvParms3( void ) {}
+    // per-frame evaluate
+    void Evaluate(float time, float* dest) const;
 
-			void		Init( const rvEnvParms & copy, float duration );
-			void		Evaluate( const float time, float *dest );
+    // extra helpers kept from previous snippet
+    void Scale(float k);
+    void Transform(const idVec3& normal);
+    void Rotate(const idAngles& a);
 
-			float		*GetStart( void ) { return( mStart.ToFloatPtr() ); }
-			float		*GetEnd( void ) { return( mEnd.ToFloatPtr() ); }
-
-			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
-			void		Transform( const idVec3 normal ) { mStart *= normal.ToMat3(); mEnd *= normal.ToMat3(); }
-			void		Rotate( const rvAngles &angles );
-public:
-	const	idDeclTable	*mTable;
-			idVec3		mEnvOffset;
-
-			bool		mFastLookup;
-			idVec3		mStart;
-			idVec3		mRate;
-			idVec3		mEnd;
+    idVec3 mStart = vec3_origin;
+    idVec3 mEnd = vec3_origin;
+    idVec3 mRate = idVec3(1.f, 1.f, 1.f);
+    idVec3 mEnvOffset = vec3_zero;
+    bool   mFixedRateAndOffset = false;
 };
-
-class rvEnvParms1Particle
-{
-public:
-	friend	class		rvEnvParms;
-	friend	class		rvParticle;
-
-						rvEnvParms1Particle( void ) {}
-						~rvEnvParms1Particle( void ) {}
-
-			void		Init( const rvEnvParms & copy, float duration );
-			void		Evaluate( const rvEnvParms & params, const float time, float oneOverDuration, float *dest );
-
-			float		*GetStart( void ) { return( &mStart ); }
-			float		*GetEnd( void ) { return( &mEnd ); }
-
-			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
-			void		Transform( const idVec3 normal ) {}
-			void		Rotate( const rvAngles &angles );
-public:
-			float		mStart;
-			float		mEnd;
-};
-
-class rvEnvParms2Particle
-{
-public:
-	friend	class		rvEnvParms;
-	friend	class		rvParticle;
-
-						rvEnvParms2Particle( void ) {}
-						~rvEnvParms2Particle( void ) {}
-
-			void		Init( const rvEnvParms & copy, float duration );
-			void		Evaluate( const rvEnvParms & params, const float time, float oneOverDuration, float *dest );
-
-			float		*GetStart( void ) { return( mStart.ToFloatPtr() ); }
-			float		*GetEnd( void ) { return( mEnd.ToFloatPtr() ); }
-
-			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
-			void		Transform( const idVec3 normal ) {}
-			void		Rotate( const rvAngles &angles );
-public:
-			idVec2		mStart;
-			idVec2		mEnd;
-};
-
-class rvEnvParms3Particle
-{
-public:
-	friend	class		rvEnvParms;
-	friend	class		rvParticle;
-	friend  class		rvDebrisParticle;
-	friend  class		rvLineParticle;
-	friend  class		rvElectricityParticle;
-
-						rvEnvParms3Particle( void ) {}
-						~rvEnvParms3Particle( void ) {}
-
-			void		Init( const rvEnvParms & copy, float duration );
-			void		Evaluate( const rvEnvParms & params, const float time, float oneOverDuration, float *dest );
-
-			float		*GetStart( void ) { return( mStart.ToFloatPtr() ); }
-			float		*GetEnd( void ) { return( mEnd.ToFloatPtr() ); }
-
-			void		Scale( const float constant ) { mStart *= constant; mEnd *= constant; }
-			void		Transform( const idMat3 &m ) { mStart *= m; mEnd *= m; }
-			void		Transform( const idVec3 normal ) { idMat3 const m = normal.ToMat3(); mStart *= m; mEnd *= m; }
-			void		Rotate( const rvAngles &angles );
-public:
-			idVec3		mStart;
-			idVec3		mEnd;
-};
-
-#endif // _BSE_ENVELOPE_H_INC_

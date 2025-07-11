@@ -1,567 +1,440 @@
-// BSE_SegmentTemplate.cpp
-//
+﻿/*
+===========================================================================
 
+QUAKE 4 BSE CODE RECREATION EFFORT - (c) 2025 by Justin Marshall(IceColdDuke).
 
+QUAKE 4 BSE CODE RECREATION EFFORT is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
+QUAKE 4 BSE CODE RECREATION EFFORT is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 
-#include "BSE_Envelope.h"
-#include "BSE_Particle.h"
-#include "BSE.h"
+You should have received a copy of the GNU General Public License
+along with QUAKE 4 BSE CODE RECREATION EFFORT.  If not, see <http://www.gnu.org/licenses/>.
 
-void rvSegmentTemplate::CreateParticleTemplate(rvDeclEffect* effect, idParser* src, int particleType)
-{
-	mParticleTemplate.Init();
-	mParticleTemplate.mType = particleType;
-	mParticleTemplate.SetParameterCounts();
-	mParticleTemplate.Parse(effect, src);
-}
+In addition, the QUAKE 4 BSE CODE RECREATION EFFORT is also subject to certain additional terms. You should have received a copy of these additional terms immediately following the terms and conditions of the GNU General Public License which accompanied the QUAKE 4 BSE CODE RECREATION EFFORT.  
 
-bool rvSegmentTemplate::GetSoundLooping()
-{
-	if (mSoundShader != NULL) {
-		return ((unsigned int)mSoundShader->GetParms()->soundShaderFlags >> 5) & 1;
-	}
-	return false;
-}
+If you have questions concerning this license or the applicable additional terms, you may contact in writing justinmarshall20@gmail.com 
 
-void rvSegmentTemplate::EvaluateTrailSegment(rvDeclEffect* et) {
-	if (mParticleTemplate.mTrailInfo->mTrailType)
-	{
-		// jmarshall - WindowName isn't defined and doesn't make sense here
-				// if (idStr::Cmp(v3->mTrailTypeName.data, (const char*)&WindowName))
-		// jmarshall end
-		{
-			mTrailSegmentIndex = et->GetTrailSegmentIndex(mParticleTemplate.mTrailInfo->mTrailTypeName);
-		}
-	}
-}
+===========================================================================
+*/
 
-bool rvSegmentTemplate::GetSmoker()
-{
-	return mParticleTemplate.mTrailInfo->mTrailType == 3;
-}
+#include "bse.h"
 
-bool rvSegmentTemplate::DetailCull() const
-{
-	// jmarshall - effect culling function. forcing everything to no cull
-	return false; // 0.0 != mDetail && mDetail > bse_detailLevel.internalVar->floatValue;
-// jmarshall end
-}
-
-float rvSegmentTemplate::EvaluateCost(int activeParticles) const
-{
-	float v4; // [esp+8h] [ebp-4h]
-	float activeParticlesa; // [esp+10h] [ebp+4h]
-
-	if ((mFlags & 1) == 0)
-		return 0.0;
-	v4 = rvSegmentTemplate::mSegmentBaseCosts[mSegType];
-	if (mParticleTemplate.mType)
-	{
-		activeParticlesa = (float)activeParticles;
-		v4 = mParticleTemplate.CostTrail(activeParticlesa) + v4;
-		if ((mParticleTemplate.mFlags & 0x200) != 0)
-			v4 = activeParticlesa * 80.0 + v4;
-	}
-	return v4;
-}
-
-rvParticleTemplate& rvParticleTemplate::operator=(const rvParticleTemplate& __that)
-{
-	mFlags = __that.mFlags;
-	mTraceModelIndex = __that.mTraceModelIndex;
-	mType = __that.mType;
-	mMaterial = __that.mMaterial;
-	mModel = __that.mModel;
-	mEntityDefName = __that.mEntityDefName;
-	mGravity = __that.mGravity;
-	mDuration = __that.mDuration;
-	mCentre = __that.mCentre;
-	mTiling = __that.mTiling;
-	mBounce = __that.mBounce;
-	mPhysicsDistance = __that.mPhysicsDistance;
-	mWindDeviationAngle = __that.mWindDeviationAngle;
-	mVertexCount = __that.mVertexCount;
-	mIndexCount = __that.mIndexCount;
-	mTrailRepeat = __that.mTrailRepeat;
-	mNumSizeParms = __that.mNumSizeParms;
-	mNumRotateParms = __that.mNumRotateParms;
-	mNumFrames = __that.mNumFrames;
-	mTrailInfo = __that.mTrailInfo;
-	mElecInfo = __that.mElecInfo;
-	mpSpawnPosition = __that.mpSpawnPosition;
-	mpSpawnDirection = __that.mpSpawnDirection;
-	mpSpawnVelocity = __that.mpSpawnVelocity;
-	mpSpawnAcceleration = __that.mpSpawnAcceleration;
-	mpSpawnFriction = __that.mpSpawnFriction;
-	mpSpawnTint = __that.mpSpawnTint;
-	mpSpawnFade = __that.mpSpawnFade;
-	mpSpawnSize = __that.mpSpawnSize;
-	mpSpawnRotate = __that.mpSpawnRotate;
-	mpSpawnAngle = __that.mpSpawnAngle;
-	mpSpawnOffset = __that.mpSpawnOffset;
-	mpSpawnLength = __that.mpSpawnLength;
-	mpSpawnWindStrength = __that.mpSpawnWindStrength;
-	mpTintEnvelope = __that.mpTintEnvelope;
-	mpFadeEnvelope = __that.mpFadeEnvelope;
-	mpSizeEnvelope = __that.mpSizeEnvelope;
-	mpRotateEnvelope = __that.mpRotateEnvelope;
-	mpAngleEnvelope = __that.mpAngleEnvelope;
-	mpOffsetEnvelope = __that.mpOffsetEnvelope;
-	mpLengthEnvelope = __that.mpLengthEnvelope;
-	mpDeathTint = __that.mpDeathTint;
-	mpDeathFade = __that.mpDeathFade;
-	mpDeathSize = __that.mpDeathSize;
-	mpDeathRotate = __that.mpDeathRotate;
-	mpDeathAngle = __that.mpDeathAngle;
-	mpDeathOffset = __that.mpDeathOffset;
-	mpDeathLength = __that.mpDeathLength;
-	mNumImpactEffects = __that.mNumImpactEffects;
-	mImpactEffects[0] = __that.mImpactEffects[0];
-	mImpactEffects[1] = __that.mImpactEffects[1];
-	mImpactEffects[2] = __that.mImpactEffects[2];
-	mImpactEffects[3] = __that.mImpactEffects[3];
-	mNumTimeoutEffects = __that.mNumTimeoutEffects;
-	mTimeoutEffects[0] = __that.mTimeoutEffects[0];
-	mTimeoutEffects[1] = __that.mTimeoutEffects[1];
-	mTimeoutEffects[2] = __that.mTimeoutEffects[2];
-	mTimeoutEffects[3] = __that.mTimeoutEffects[3];
-	return *this;
-}
-
-void rvSegmentTemplate::Duplicate(const rvSegmentTemplate& copy)
-{
-	mDeclEffect = copy.mDeclEffect;
-	mSegmentName = copy.mSegmentName;
-	mFlags = copy.mFlags;
-	mSegType = copy.mSegType;
-	mLocalStartTime = copy.mLocalStartTime;
-	mLocalDuration = copy.mLocalDuration;
-	mScale = copy.mScale;
-	mAttenuation = copy.mAttenuation;
-	mParticleCap = copy.mParticleCap;
-	mScale = copy.mScale;
-	mDetail = copy.mDetail;
-	mCount = copy.mCount;
-	mDensity = copy.mDensity;
-	mTrailSegmentIndex = copy.mTrailSegmentIndex;
-	mNumEffects = copy.mNumEffects;
-	mEffects[0] = copy.mEffects[0];
-	mEffects[1] = copy.mEffects[1];
-	mEffects[2] = copy.mEffects[2];
-	mEffects[3] = copy.mEffects[3];
-	mSoundShader = copy.mSoundShader;
-	mSoundVolume = copy.mSoundVolume;
-	mFreqShift = copy.mFreqShift;
-	mParticleTemplate.Duplicate(copy.mParticleTemplate);
-	mDecalAxis = copy.mDecalAxis;
-}
-
+/* --------------------------------------------------------------------- */
 void rvSegmentTemplate::Init(rvDeclEffect* decl)
 {
-	mSoundShader = NULL;
-	mFlags = 0;
-	mSegType = 0;
-	mLocalStartTime.Zero();				// Start time of segment wrt effect
-	mLocalDuration.Zero();					// Min and max duration
-	mAttenuation.Zero();					// How effect fades off to the distance
-	mParticleCap = 0;
-	mScale = 0;
-	mDetail = 0;
+    mDeclEffect = decl;
+    mFlags = STF_CONSTANT;          // default “locked” bit off
+    mSegType = SEG_INVALID;
 
-	// Emitter parms	
-	mCount.Zero();							// The count of particles from a spawner
-	mDensity.Zero();						// Sets count or rate based on volume, area or length
-	mTrailSegmentIndex = 0;
+    mLocalStartTime.Zero();
+    mLocalDuration.Zero();
+    mAttenuation.Zero();
 
-	mNumEffects = 0;
-	for (int i = 0; i < BSE_NUM_SPAWNABLE; i++)
-		mEffects[i] = NULL;
+    mParticleCap = 0.0f;
+    mDetail = 0.0f;
+    mScale = 1.0f;
 
-	mSoundShader = NULL;
-	mSoundVolume.Zero();					// Starting volume of sound in decibels
-	mFreqShift.Zero();						// Frequency shift of sound
+    mCount.Set(1.0f, 1.0f);
+    mDensity.Zero();
 
-	mDecalAxis = 0;
-	mDeclEffect = decl;
-	mFlags = 1;
-	mSegType = 0;
-	mLocalStartTime.y = 0.0;
-	mLocalStartTime.x = 0.0;
-	mParticleTemplate.mImpactEffects[3] = NULL;
-	mParticleTemplate.mImpactEffects[2] = NULL;
-	mParticleTemplate.mTimeoutEffects[0] = NULL;
-	mParticleTemplate.mNumTimeoutEffects = 0.0;
-	mParticleTemplate.mTimeoutEffects[1] = NULL;
-	mParticleTemplate.mTimeoutEffects[2] = NULL;
-	mParticleTemplate.mTimeoutEffects[3] = NULL;
-	mParticleTemplate.mFlags = 1.0;
-	mParticleTemplate.mTraceModelIndex = 1.0;
-	mParticleTemplate.mMaterial = NULL;
-	mParticleTemplate.mType = 0.0;
-	mParticleTemplate.mModel = NULL;
-	mParticleTemplate.mEntityDefName = "";
-	mParticleTemplate.mGravity.x = 1.0;
-	mParticleTemplate.mGravity.y = 1.0;
-	mParticleTemplate.mDuration.x = 3;
-	mParticleTemplate.Init();
+    mTrailSegmentIndex = -1;
+    mNumEffects = 0;
+    memset(mEffects, 0, sizeof(mEffects));
+
+    mSoundShader = nullptr;
+    mSoundVolume.Zero();
+    mFreqShift.Set(1.0f, 1.0f);
+
+    mParticleTemplate.Init();
+    mBSEEffect = nullptr;
+
+    mSegmentName = "";
 }
 
+/* --------------------------------------------------------------------- */
+void rvSegmentTemplate::CreateParticleTemplate(rvDeclEffect* effect,
+    idLexer* lexer,
+    int           particleType)
+{
+    mParticleTemplate.Init();
+    mParticleTemplate.mType = particleType;
+    mParticleTemplate.SetParameterCounts();
+    mParticleTemplate.Parse(effect, lexer);
+}
 
+/* --------------------------------------------------------------------- */
+int rvSegmentTemplate::GetTexelCount() const
+{
+    if (mParticleTemplate.mMaterial) {
+        return mParticleTemplate.mMaterial->GetTexelCount();
+    }
+    return 0;
+}
+
+/* --------------------------------------------------------------------- */
+bool rvSegmentTemplate::GetSmoker() const
+{
+    return mParticleTemplate.mTrailType == 3;     // ‘smoker’ trail
+}
+
+/* --------------------------------------------------------------------- */
+bool rvSegmentTemplate::GetSoundLooping() const
+{
+    return mSoundShader && (mSoundShader->parms.soundShaderFlags & SSF_LOOPING);
+}
+
+/* --------------------------------------------------------------------- */
+bool rvSegmentTemplate::DetailCull() const
+{
+    return (mDetail > 0.0f) &&
+        (bse_scale.GetFloat() < mDetail);    // cvar comparison
+}
+
+float rvSegmentTemplate::CalculateBounds() 
+{
+    rvParticleTemplate* p_mParticleTemplate; // esi
+    int mType; // eax
+    double result; // st7
+    float maxLength; // [esp+0h] [ebp-Ch]
+    float maxDist; // [esp+4h] [ebp-8h]
+    float maxSize; // [esp+8h] [ebp-4h]
+
+    switch (this->mSegType)
+    {
+    case 2:
+    case 3:
+    case 7:
+        p_mParticleTemplate = &this->mParticleTemplate;
+        maxSize = mParticleTemplate.GetMaxParmValue(
+            &this->mParticleTemplate.mSpawnSize,
+            &this->mParticleTemplate.mDeathSize,
+            &this->mParticleTemplate.mSizeEnvelope);
+        maxDist = p_mParticleTemplate->GetFurthestDistance();
+        mType = p_mParticleTemplate->mType;
+        if (mType == 2 || mType == 7)
+            maxLength = p_mParticleTemplate->GetMaxParmValue(
+                &p_mParticleTemplate->mSpawnLength,
+                &p_mParticleTemplate->mDeathLength,
+                &p_mParticleTemplate->mLengthEnvelope);
+        else
+            maxLength = 0.0;
+        result = p_mParticleTemplate->GetMaxParmValue(
+            &p_mParticleTemplate->mSpawnOffset,
+            &p_mParticleTemplate->mDeathOffset,
+            &p_mParticleTemplate->mOffsetEnvelope)
+            + maxLength
+            + maxDist
+            + maxSize;
+        break;
+    case 6:
+        result = mParticleTemplate.GetMaxParmValue(
+            &this->mParticleTemplate.mSpawnSize,
+            &this->mParticleTemplate.mDeathSize,
+            &this->mParticleTemplate.mSizeEnvelope);
+        break;
+    default:
+        result = 8.0;
+        break;
+    }
+    return result;
+}
+
+/* --------------------------------------------------------------------- */
+void rvSegmentTemplate::SetMaxDuration(rvDeclEffect* effect)
+{
+    if (!(mFlags & STF_MAX_DURATION)) {
+        effect->SetMaxDuration(mLocalStartTime.x + mLocalDuration.x);
+
+        if (mParticleTemplate.mType != 0) {
+            effect->SetMaxDuration(mLocalStartTime.x + mLocalDuration.x + mParticleTemplate.mDuration.y);
+        }
+    }
+}
+
+/* --------------------------------------------------------------------- */
 void rvSegmentTemplate::SetMinDuration(rvDeclEffect* effect)
 {
-	const idSoundShader* v2; // eax
-	float duration; // [esp+4h] [ebp-4h]
+    if ((mFlags & STF_MAX_DURATION) != 0)
+        return;
 
-	if ((mFlags & 0x10) == 0)
-	{
-		v2 = mSoundShader;
-		if (!v2 || (v2->GetParms()->soundShaderFlags & 0x20) == 0)
-		{
-			duration = mLocalDuration.x + mLocalStartTime.x;
-			effect->SetMinDuration(duration);
-		}
-	}
+    if (!mSoundShader || !(mSoundShader->parms.soundShaderFlags & SSF_LOOPING)) {
+        effect->SetMinDuration(mLocalStartTime.x + mLocalDuration.x);
+    }
 }
 
+/* --------------------------------------------------------------------- */
+bool rvSegmentTemplate::Compare(const rvSegmentTemplate& a) const
+{
+    /* cheap reject ------------------------------------------------------ */
+    if (mSegmentName.Icmp(a.mSegmentName) != 0)
+        return false;
+
+    if (((mFlags ^ a.mFlags) & ~STF_LOCKED) != 0)
+        return false;
+
+    if (mSegType != a.mSegType)
+        return false;
+
+    /* timeline ---------------------------------------------------------- */
+    if (mSegType != SEG_SOUND) {   // sound segs ignore timings
+        if (mLocalStartTime != a.mLocalStartTime ||
+            mLocalDuration != a.mLocalDuration)
+            return false;
+    }
+
+    /* scale/detail/attenuation ----------------------------------------- */
+    if (mScale != a.mScale ||
+        mDetail != a.mDetail ||
+        mAttenuation != a.mAttenuation)
+        return false;
+
+    /* count vs density variant ----------------------------------------- */
+    if (mDensity.y == 0.0f) {
+        if (mCount != a.mCount)
+            return false;
+    }
+    else {
+        if (mDensity != a.mDensity ||
+            mParticleCap != a.mParticleCap)
+            return false;
+    }
+
+    /* trail / effect list ---------------------------------------------- */
+    if (mTrailSegmentIndex != a.mTrailSegmentIndex)
+        return false;
+
+    if (mNumEffects != a.mNumEffects)
+        return false;
+
+    for (int i = 0; i < mNumEffects; ++i) {
+        if (mEffects[i] != a.mEffects[i])
+            return false;
+    }
+
+    /* sound / freq ------------------------------------------------------ */
+    if (mSoundShader != a.mSoundShader ||
+        mSoundVolume != a.mSoundVolume ||
+        mFreqShift != a.mFreqShift)
+        return false;
+
+    /* particle template deep compare ----------------------------------- */
+    return mParticleTemplate.Compare(a.mParticleTemplate);
+}
+
+/* --------------------------------------------------------------------- */
 bool rvSegmentTemplate::Finish(rvDeclEffect* effect)
 {
-	rvParticleTemplate* v3; // edi
-	int v5; // ecx
-	float v6; // [esp+4h] [ebp-4h]
-	float v7; // [esp+4h] [ebp-4h]
-	float v8; // [esp+4h] [ebp-4h]
-	float v9; // [esp+4h] [ebp-4h]
-	float v10; // [esp+4h] [ebp-4h]
+    // 1) Ensure each “.x/.y” range has min ≤ max (manual swap, no std::swap)
+    if (mLocalStartTime.x > mLocalStartTime.y) {
+        float tmp = mLocalStartTime.x;
+        mLocalStartTime.x = mLocalStartTime.y;
+        mLocalStartTime.y = tmp;
+    }
+    if (mLocalDuration.x > mLocalDuration.y) {
+        float tmp = mLocalDuration.x;
+        mLocalDuration.x = mLocalDuration.y;
+        mLocalDuration.y = tmp;
+    }
+    if (mCount.x > mCount.y) {
+        float tmp = mCount.x;
+        mCount.x = mCount.y;
+        mCount.y = tmp;
+    }
+    if (mDensity.x > mDensity.y) {
+        float tmp = mDensity.x;
+        mDensity.x = mDensity.y;
+        mDensity.y = tmp;
+    }
+    if (mAttenuation.x > mAttenuation.y) {
+        float tmp = mAttenuation.x;
+        mAttenuation.x = mAttenuation.y;
+        mAttenuation.y = tmp;
+    }
 
-	if (mLocalStartTime.y <= mLocalStartTime.x)
-	{
-		v6 = mLocalStartTime.x;
-		mLocalStartTime.x = mLocalStartTime.y;
-		mLocalStartTime.y = v6;
-	}
-	if (mLocalDuration.y <= mLocalDuration.x)
-	{
-		v7 = mLocalDuration.x;
-		mLocalDuration.x = mLocalDuration.y;
-		mLocalDuration.y = v7;
-	}
-	if (mCount.y <= mCount.x)
-	{
-		v8 = mCount.x;
-		mCount.x = mCount.y;
-		mCount.y = v8;
-	}
-	if (mDensity.y <= mDensity.x)
-	{
-		v9 = mDensity.x;
-		mDensity.x = mDensity.y;
-		mDensity.y = v9;
-	}
-	if (mAttenuation.y <= mAttenuation.x)
-	{
-		v10 = mAttenuation.x;
-		mAttenuation.x = mAttenuation.y;
-		mAttenuation.y = v10;
-	}
-	if (mParticleTemplate.mType)
-	{
-		v3 = &mParticleTemplate;
-		mParticleTemplate.Finish();
-		v3->mFlags &= 0xFFF7FFFF;
-	}
-	switch (mSegType)
-	{
-	case 2:
-		mFlags |= 4u;
-		if (mParticleTemplate.mType && (mFlags & 0x20) == 0)
-			goto LABEL_25;
-		return 0;
-	case 3:
-		mFlags |= 4u;
-		if (mParticleTemplate.mType)
-			goto LABEL_25;
-		return 0;
-	case 4:
-		mFlags |= 4u;
-		mLocalStartTime.y = 0.0;
-		mLocalStartTime.x = 0.0;
-		mLocalDuration.y = 0.0;
-		mLocalDuration.x = 0.0;
-		if (!mParticleTemplate.mType)
-			return 0;
-		mParticleTemplate.mFlags |= 0x80000u;
-	LABEL_25:
-		v5 = mParticleTemplate.mType;
-		if (v5 == 10)
-			mFlags = mFlags & 0xFFFFFFFB | 0x100;
-		if ((mFlags & 0x20) != 0
-			|| mParticleTemplate.mTrailInfo->mTrailType == 3
-			|| (mParticleTemplate.mFlags & 0x200) != 0
-			|| mParticleTemplate.mNumTimeoutEffects)
-		{
-			mFlags |= 0x2000u;
-		}
-		if (v5 == 7 || v5 == 6)
-			mFlags |= 0x2000u;
-		return 1;
-	case 5:
-		mFlags |= 0x10u;
-		goto LABEL_25;
-	case 6:
-		mFlags = mFlags & 0xFFFFFFFB | 0x100;
-		goto LABEL_25;
-	case 9:
-	case 0xA:
-		if (mAttenuation.y > 0.0)
-			mFlags |= 0x40u;
-		goto LABEL_24;
-	default:
-	LABEL_24:
-		mFlags &= 0xFFFFFFFB;
-		goto LABEL_25;
-	}
+    // 2) Finish nested particle template, if any
+    if (mParticleTemplate.mType) {
+        mParticleTemplate.Finish();
+        // clear the “intermediate-trail” bit (third byte)
+        mParticleTemplate.mFlags &= ~(0x08 << 16);
+    }
+
+    // 3) Segment‐type‐specific setup
+    switch (mSegType) {
+    case 2: // single‐shot
+        mFlags |= 0x04;
+        if (!mParticleTemplate.mType) return false;
+        if (mFlags & 0x20) return false;
+        break;
+
+    case 3: // conditional
+        mFlags |= 0x04;
+        if (!mParticleTemplate.mType) return false;
+        break;
+
+    case 4: // burst
+        mFlags |= 0x04;
+        // reset any local time/duration
+        mLocalStartTime.x = mLocalStartTime.y = 0.0f;
+        mLocalDuration.x = mLocalDuration.y = 0.0f;
+        if (!mParticleTemplate.mType) return false;
+        // set the “final-trail” bit
+        mParticleTemplate.mFlags |= (0x08 << 16);
+        break;
+
+    case 5: // continuous
+        mFlags |= 0x10;
+        break;
+
+    case 6: // delayed
+        mFlags &= ~0x04;    // clear active
+        mFlags |= 0x0100;  // set byte1 bit0
+        break;
+
+    case 9:  // attenuation-only
+    case 10:
+    case 11:
+        if (mAttenuation.y > 0.0f) {
+            mFlags |= 0x40;
+        }
+        // fall through to default
+    default:
+        mFlags &= ~0x04;
+        break;
+    }
+
+    // 4) Common post-setup logic
+    if (mParticleTemplate.mType == 9) {
+        mFlags &= ~0x04;
+        mFlags |= 0x0100;
+    }
+
+    if ((mFlags & 0x20) ||
+        mParticleTemplate.mTrailType == 3 ||
+        (mParticleTemplate.mFlags & 0x0200) ||
+        mParticleTemplate.mNumTimeoutEffects) {
+        mFlags |= 0x0200;  // set byte1 bit1
+    }
+
+    if (mParticleTemplate.mType == 6 || mParticleTemplate.mType == 7) {
+        mFlags |= 0x0200;
+    }
+
+    return true;
 }
 
-
-void rvSegmentTemplate::operator=(const rvSegmentTemplate& copy)
+/* --------------------------------------------------------------------- */
+void rvSegmentTemplate::EvaluateTrailSegment(rvDeclEffect* et)
 {
-	this->mDeclEffect = copy.mDeclEffect;
-	this->mSegmentName = copy.mSegmentName;
-	this->mFlags = copy.mFlags;
-	this->mSegType = copy.mSegType;
-	this->mLocalStartTime = copy.mLocalStartTime;
-	this->mLocalDuration = copy.mLocalDuration;
-	this->mScale = copy.mScale;
-	this->mAttenuation = copy.mAttenuation;
-	this->mParticleCap = copy.mParticleCap;
-	this->mScale = copy.mScale;
-	this->mDetail = copy.mDetail;
-	this->mCount = copy.mCount;
-	this->mDensity = copy.mDensity;
-	this->mTrailSegmentIndex = copy.mTrailSegmentIndex;
-	this->mNumEffects = copy.mNumEffects;
-	this->mEffects[0] = copy.mEffects[0];
-	this->mEffects[1] = copy.mEffects[1];
-	this->mEffects[2] = copy.mEffects[2];
-	this->mEffects[3] = copy.mEffects[3];
-	this->mSoundShader = copy.mSoundShader;
-	this->mSoundVolume = copy.mSoundVolume;
-	this->mFreqShift = copy.mFreqShift;
-	this->mParticleTemplate = copy.mParticleTemplate;
-	this->mDecalAxis = copy.mDecalAxis;
+    if (mParticleTemplate.mTrailTypeName.Icmp(entityFilter) != 0 &&
+        mParticleTemplate.mTrailType != 0)
+    {
+        mTrailSegmentIndex = et->GetTrailSegmentIndex(mParticleTemplate.mTrailTypeName);
+    }
 }
 
-void __thiscall rvSegmentTemplate::SetMaxDuration(rvDeclEffect* effect)
+/* --------------------------------------------------------------------- */
+bool rvSegmentTemplate::Parse(rvDeclEffect* effect,
+    int            segmentType,
+    idLexer* lexer)
 {
-	rvSegmentTemplate* v2; // esi
-	rvDeclEffect* v3; // edi
-	float duration; // ST0C_4
-	float effecta; // [esp+14h] [ebp+4h]
+    idToken token;
+    mSegType = segmentType;
 
-	v2 = this;
-	if (!(((unsigned int)this->mFlags >> 4) & 1))
-	{
-		v3 = effect;
-		duration = this->mLocalDuration.x + this->mLocalStartTime.x;
-		effect->SetMaxDuration(duration);
-		if (v2->mParticleTemplate.mType)
-		{
-			effecta = v2->mLocalDuration.x + v2->mLocalStartTime.x + v2->mParticleTemplate.mDuration.y;
-			v3->SetMaxDuration(effecta);
-		}
-	}
-}
+    /* -------- optional explicit segment name -------------------------- */
+    if (!lexer->ReadToken(&token))
+        return false;
 
-bool rvSegmentTemplate::Parse(rvDeclEffect* effect, int segmentType, idParser* lexer) {
-	idToken token;
+    if (token.Icmp("{") != 0) {
+        mSegmentName = token;
+    }
+    else {
+        mSegmentName = va("unnamed%d", effect->mSegmentTemplates.Num());
+        lexer->UnreadToken(&token);                // put the “{” back
+    }
 
-	if (!lexer->ReadToken(&token))
-	{
-		return false;
-	}
+    /* -------- open brace ------------------------------------------------ */
+    if (!lexer->ExpectTokenString("{"))
+        return false;
 
-	if (token != "{") {
-		mSegmentName = token;
-	}
-	else {
-		mSegmentName = va("unnamed%d", effect->GetNumSegmentTemplates());
-		lexer->UnreadToken(&token);
-	}
+    /* -------- parameter loop ------------------------------------------- */
+    while (lexer->ReadToken(&token))
+    {
+        if (token == "}")
+            break;
 
-	mSegType = segmentType;
+        /* --- numeric pairs -------------------------------------------- */
+#       define READ_VEC2( dst )                 \
+            do {                                \
+                (dst).x = lexer->ParseFloat();  \
+                lexer->ExpectTokenString( "," );\
+                (dst).y = lexer->ParseFloat();  \
+            } while(0)
 
-	if (lexer->ExpectTokenString("{") && lexer->ReadToken(&token))
-	{
-		while (token != "}")
-		{
-			if (token == "decalAxis")
-			{
-				mDecalAxis = lexer->ParseInt();
-			}
-			else if (token == "orientateIdentity")
-			{
-				mFlags |= STFLAG_ORIENTATE_IDENTITY;
-			}
-			else if (token == "useMaterialColor")
-			{
-				mFlags |= STFLAG_USEMATCOLOR;
-			}
-			else if (token == "depthsort")
-			{
-				mFlags |= STFLAG_DEPTH_SORT;
-			}
-			else if (token == "calcDuration")
-			{
-				mFlags |= STFLAG_CALCULATE_DURATION;
-			}
-			else if (token == "constant")
-			{
-				mFlags |= STFLAG_INFINITE_DURATION;
-			}
-			else if (token == "looping")
-			{
-				// jmarshall - there was no code for this?
-			}
-			else if (token == "locked")
-			{
-				mFlags |= STFLAG_LOCKED;
-			}
-			else if (token == "inverseAttenuateEmitter")
-			{
-				mFlags |= STFLAG_INVERSE_ATTENUATE;
-			}
-			else if (token == "attenuateEmitter")
-			{
-				mFlags |= STFLAG_ATTENUATE_EMITTER;
-			}
-			else if (token == "scale")
-			{
-				mScale = lexer->ParseFloat();
-			}
-			else if (token == "channel")
-			{
-				lexer->ReadToken(&token); // is this ignored?
-			}
-			else if (token == "effect")
-			{
-				lexer->ReadToken(&token);
-				if (mNumEffects >= 4)
-				{
-					common->FatalError("Unable to add effect '%s' - too many effects\n", token.c_str());
-				}
-				else
-				{
-					mEffects[this->mNumEffects++] = (rvDeclEffect*)declManager->FindType(DECL_EFFECT, token);
-				}
-			}
-			else if (token == "freqShift")
-			{
-				mFreqShift.x = lexer->ParseFloat();
-				lexer->ExpectTokenString(",");
-				mFreqShift.y = lexer->ParseFloat();
-			}
-			else if (token == "attenuation")
-			{
-				mAttenuation.x = lexer->ParseFloat();
-				lexer->ExpectTokenString(",");
-				mAttenuation.y = lexer->ParseFloat();
-			}
-			else if (token == "volume")
-			{
-				mSoundVolume.x = lexer->ParseFloat();
-				lexer->ExpectTokenString(",");
-				mSoundVolume.y = lexer->ParseFloat();
-			}
-			else if (token == "soundShader")
-			{
-				lexer->ReadToken(&token);
-				mSoundShader = (idSoundShader*)declManager->FindSound(token);
-				// jmarshall: Doom 3's sound engine didn't expose gettimelength!
-								//float effecta = mSoundShader->(double)v11->GetTimeLength((idSoundShader*)v11) * 0.001;
-				float effecta = 1.0f;
-				// jmarshall end
-				mLocalDuration.x = effecta;
-				mLocalDuration.y = effecta;
-			}
-			else if (token == "detail")
-			{
-				mDetail = lexer->ParseFloat();
-			}
-			else if (token == "duration")
-			{
-				mLocalDuration.x = lexer->ParseFloat();
-				lexer->ExpectTokenString(",");
-				mLocalDuration.y = lexer->ParseFloat();
-			}
-			else if (token == "start")
-			{
-				mLocalStartTime.x = lexer->ParseFloat();
-				lexer->ExpectTokenString(",");
-				mLocalStartTime.y = lexer->ParseFloat();
-			}
-			else if (token == "density")
-			{
-				mDensity.x = lexer->ParseFloat();
-				lexer->ExpectTokenString(",");
-				mDensity.y = lexer->ParseFloat();
-			}
-			else if (token == "count" || token == "rate")
-			{
-				mCount.x = lexer->ParseFloat();
-				lexer->ExpectTokenString(",");
-				mCount.y = lexer->ParseFloat();
-			}
-			else if (token == "particleCap")
-			{
-				mParticleCap = lexer->ParseFloat();
-			}
-			else if (token == "debris")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_DEBRIS);
-			}
-			else if (token == "orientedlinked")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_ORIENTEDLINKED);
-			}
-			else if (token == "linked")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_LINKED);
-			}
-			else if (token == "electricity")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_ELECTRICITY);
-			}
-			else if (token == "light")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_LIGHT);
-			}
-			else if (token == "model")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_MODEL);
-			}
-			else if (token == "decal")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_DECAL);
-			}
-			else if (token == "oriented")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_ORIENTED);
-			}
-			else if (token == "line")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_LINE);
-			}
-			else if (token == "sprite")
-			{
-				CreateParticleTemplate(effect, lexer, PTYPE_SPRITE);
-			}
-			else
-			{
-				common->Warning("^4BSE:^1 Invalid segment parameter '%s' (file: %s, line: %d", token.c_str(), lexer->GetFileName(), lexer->GetLineNum());
-			}
+        /* --- dispatch table ------------------------------------------- */
+        if (token.Icmp("count") == 0 ||
+            token.Icmp("rate") == 0) {
+            READ_VEC2(mCount);
+        }
+        else if (token.Icmp("density") == 0) { READ_VEC2(mDensity); }
+        else if (token.Icmp("particleCap") == 0) { mParticleCap = lexer->ParseFloat(); }
+        else if (token.Icmp("start") == 0) { READ_VEC2(mLocalStartTime); }
+        else if (token.Icmp("duration") == 0) { READ_VEC2(mLocalDuration); }
+        else if (token.Icmp("detail") == 0) { mDetail = lexer->ParseFloat(); }
+        else if (token.Icmp("scale") == 0) { mScale = lexer->ParseFloat(); }
+        else if (token.Icmp("attenuation") == 0) { READ_VEC2(mAttenuation); }
+        else if (token.Icmp("attenuateEmitter") == 0) { mFlags |= STF_EMITTER_ATTEN; }
+        else if (token.Icmp("inverseAttenuateEmitter") == 0) { mFlags |= STF_EMITTER_INV_ATTEN; }
+        else if (token.Icmp("locked") == 0) { mFlags |= STF_LOCKED; }
+        else if (token.Icmp("constant") == 0) { mFlags |= STF_CONSTANT; }
+        /* --- sound ---------------------------------------------------- */
+        else if (token.Icmp("soundShader") == 0)
+        {
+            lexer->ReadToken(&token);
+            mSoundShader = declManager->FindSound(token, true);
+            const float len = mSoundShader->GetTimeLength();
+            mLocalDuration.x = mLocalDuration.y = len;
+            mFlags |= STF_HAS_SOUND;
+        }
+        else if (token.Icmp("volume") == 0) { READ_VEC2(mSoundVolume); }
+        else if (token.Icmp("freqShift") == 0) { READ_VEC2(mFreqShift); }
+        /* --- nested effect refs --------------------------------------- */
+        else if (token.Icmp("effect") == 0)
+        {
+            lexer->ReadToken(&token);
+            if (mNumEffects >= 4) {
+                common->Warning("^4BSE:^1 Too many sub-effects in segment '%s'",
+                    mSegmentName.c_str());
+            }
+            else {
+                mEffects[mNumEffects++] = declManager->FindEffect(token, true);
+            }
+        }
+        /* --- particle primitive keywords ------------------------------ */
+        else if (token.Icmp("sprite") == 0) CreateParticleTemplate(effect, lexer, 1);
+        else if (token.Icmp("line") == 0) CreateParticleTemplate(effect, lexer, 2);
+        else if (token.Icmp("oriented") == 0) CreateParticleTemplate(effect, lexer, 3);
+        else if (token.Icmp("decal") == 0) CreateParticleTemplate(effect, lexer, 4);
+        else if (token.Icmp("model") == 0) CreateParticleTemplate(effect, lexer, 5);
+        else if (token.Icmp("light") == 0) CreateParticleTemplate(effect, lexer, 6);
+        else if (token.Icmp("electricity") == 0) CreateParticleTemplate(effect, lexer, 7);
+        else if (token.Icmp("linked") == 0) CreateParticleTemplate(effect, lexer, 8);
+        else if (token.Icmp("debris") == 0) CreateParticleTemplate(effect, lexer, 9);
+        /* --- channel-only keyword ------------------------------------- */
+        else if (token.Icmp("channel") == 0) { /* nothing – marker */ }
+        /* --- unknown token -------------------------------------------- */
+        else
+        {
+            common->Warning("^4BSE:^1 Invalid segment parameter '%s' (file: %s, line: %d)",
+                token.c_str(), lexer->GetFileName(), lexer->GetLineNum());
+        }
+#       undef READ_VEC2
+    }
 
-			lexer->ReadToken(&token);
-		}
-	}
+    return true;
 }

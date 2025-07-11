@@ -1,631 +1,743 @@
-// BSE_Segment.cpp
-//
+﻿/*
+===========================================================================
+
+QUAKE 4 BSE CODE RECREATION EFFORT - (c) 2025 by Justin Marshall(IceColdDuke).
+
+QUAKE 4 BSE CODE RECREATION EFFORT is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+QUAKE 4 BSE CODE RECREATION EFFORT is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with QUAKE 4 BSE CODE RECREATION EFFORT.  If not, see <http://www.gnu.org/licenses/>.
+
+In addition, the QUAKE 4 BSE CODE RECREATION EFFORT is also subject to certain additional terms. You should have received a copy of these additional terms immediately following the terms and conditions of the GNU General Public License which accompanied the Doom 3 BFG Edition Source Code.  If not, please request a copy in writing from id Software at the address below.
+
+If you have questions concerning this license or the applicable additional terms, you may contact in writing id Software LLC, c/o ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
+
+===========================================================================
+*/
+
+#include "bse.h"
 
 
+/* ------------------------------------------------------------ helpers --- */
+namespace {
+    template <typename T>
+    ID_INLINE T Clamp(T v, T lo, T hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+}
 
+/* ------------------------------------------------------------ statics --- */
+float rvSegment::s_segmentBaseCost[11] = {
+    /* 0-10 seg types */ 0, 0, 50, 50, 0, 20, 10, 10, 0, 30, 40
+};
 
-#include "BSE_Envelope.h"
-#include "BSE_Particle.h"
-#include "BSE.h"
-
-#include "../renderer/tr_local.h"
-
-#undef min
-#undef max
-
+/* ------------------------------------------------------------- dtor ---- */
 rvSegment::~rvSegment() {
+    if (!mParticles)
+        return;
 
+    const rvSegmentTemplate* st = mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
+    if (!st)
+        return;
+
+    for (int i = 0; i < mParticleCount; ++i) {
+        rvParticle* p = &mParticles[i];
+        p->~rvParticle();
+    }
+    Memory::Free(mParticles);
+    mParticles = nullptr;
 }
 
-void rvSegment::Handle(rvBSE* effect, float time) {
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)(mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle));
-	if (segmentTemplate && mSegStartTime <= time) {
-		switch (segmentTemplate->mSegType) {
-		case SEG_EMITTER:
-		case SEG_SPAWNER:
-			if (effect->GetEndOriginChanged())
-				RefreshParticles(effect, segmentTemplate);
-			break;
-		case SEG_SOUND:
-			effect->UpdateSoundEmitter(segmentTemplate, this);
-			break;
-		case SEG_LIGHT:
-			if (segmentTemplate->mFlags & 1)
-				HandleLight(effect, segmentTemplate, time);
-			break;
-		default:
-			return;
-		}
-	}
+void rvSegment::Rewind(rvBSE* effect)
+{
+    double v2; // st7
+
+    if (effect->mDuration == this->mSegEndTime - this->mSegStartTime)
+    {
+        v2 = this->mSegStartTime - (effect->mDuration + effect->mDuration);
+        this->mSegStartTime = v2;
+        this->mLastTime = v2;
+    }
 }
 
+/* ------------------------------------------------------- ValidateSpawn -- */
 void rvSegment::ValidateSpawnRates() {
-	float minSecondsPerParticle = 0.002f;
-	float maxSecondsPerParticle = 300.0f;
-	float secondsPerParticleY = std::max(minSecondsPerParticle, std::min(maxSecondsPerParticle, mSecondsPerParticle.y));
-	mSecondsPerParticle.y = secondsPerParticleY;
-	float secondsPerParticleX = mSecondsPerParticle.x;
-	if (secondsPerParticleX < secondsPerParticleY)
-		mSecondsPerParticle.x = secondsPerParticleY;
-	else
-		mSecondsPerParticle.x = std::min(secondsPerParticleX, secondsPerParticleY);
+    float& lo = mSecondsPerParticle.x;
+    float& hi = mSecondsPerParticle.y;
+
+    hi = Clamp(hi, kMinSpawnRate, kMaxSpawnRate);
+    lo = Clamp(lo, hi, kMaxSpawnRate);   // lo may not exceed hi
 }
 
-void rvSegment::GetSecondsPerParticle(rvBSE* effect, rvSegmentTemplate* st, rvParticleTemplate* pt) {
-	double volume = pt->GetSpawnVolume(effect);
-	double minVolume = 0.002;
-	double maxVolume = 2048.0;
-	double boundedVolume = std::max(minVolume, std::min(maxVolume, volume));
-	if (volume == 0.0)
-		mCount = st->mCount;
-	else {
-		mCount.x = st->mDensity.x * boundedVolume;
-		mCount.y = boundedVolume * st->mDensity.y;
-	}
-	int segmentType = st->mSegType;
-	if (segmentType == SEG_EMITTER || segmentType == SEG_SPAWNER) {
-		if (mCount.x != 0.0)
-			mSecondsPerParticle.x = 1.0 / mCount.x;
-		if (mCount.y != 0.0)
-			mSecondsPerParticle.y = 1.0 / mCount.y;
-		ValidateSpawnRates();
-	}
+/* ------------------------------------------------ GetSecondsPerParticle -- */
+void rvSegment::GetSecondsPerParticle(rvBSE* effect,
+    rvSegmentTemplate* st,
+    rvParticleTemplate* pt)
+{
+    if (st->mDensity.y == 0.0f) {            // fixed-count segment?
+        mCount = st->mCount;
+    }
+    else {
+        /* density * volume, clamped ------------------------------------ */
+        float volume = idMath::ClampFloat(kMinSpawnRate, 1000.0f, pt->GetSpawnVolume(effect));
+
+        mCount.x = volume * st->mDensity.x;
+        mCount.y = volume * st->mDensity.y;
+
+        /* overall cap -------------------------------------------------- */
+        if (st->mParticleCap != 0.0f) {
+            mCount.x = Clamp(mCount.x, 1.0f, st->mParticleCap);
+            mCount.y = Clamp(mCount.y, 1.0f, st->mParticleCap);
+        }
+    }
+
+    /* convert count → seconds-per-particle for LOOPING / CONTINUOUS ---- */
+    if (st->mSegType == 2 || st->mSegType == 4) {
+        if (mCount.x != 0.0f) mSecondsPerParticle.x = 1.0f / mCount.x;
+        if (mCount.y != 0.0f) mSecondsPerParticle.y = 1.0f / mCount.y;
+        ValidateSpawnRates();
+    }
 }
 
-void rvSegment::InitTime(rvBSE* effect, rvSegmentTemplate* st, float time) {
-	mFlags &= ~1;
-	mSegStartTime = rvRandom::flrand(st->mLocalStartTime.x, st->mLocalStartTime.y) + time;
-	float duration = rvRandom::flrand(st->mLocalDuration.x, st->mLocalDuration.y);
-	mSegEndTime = mSegStartTime + duration;
-	if (!(st->mFlags & 0x10) || (!effect->GetLooping() && !st->GetSoundLooping())) {
-		float segDuration = mSegEndTime - time;
-		effect->SetDuration(segDuration);
-	}
+/* ------------------------------------------------------------- InitTime -- */
+void rvSegment::InitTime(rvBSE* effect,
+    rvSegmentTemplate* st,
+    float timeNow)
+{
+    mFlags &= ~1;   // clear “done” bit
+    mSegStartTime = rvRandom::flrand(st->mLocalStartTime.x,
+        st->mLocalStartTime.y)
+        + timeNow;
+
+    mSegEndTime = rvRandom::flrand(st->mLocalDuration.x,
+        st->mLocalDuration.y)
+        + mSegStartTime;
+
+    /* if this segment dictates BSE duration --------------------------- */
+    const bool segDefinesDuration =
+        (st->mFlags & 0x10) == 0 ||
+        ((effect->mFlags & 1) == 0 &&
+            !st->GetSoundLooping());
+
+    if (segDefinesDuration) {
+        effect->SetDuration(mSegEndTime - timeNow);
+    }
 }
 
-float rvSegment::AttenuateDuration(rvBSE* effect, rvSegmentTemplate* st) {
-	float attenuation = effect->GetAttenuation(st);
-	if ((st->mFlags & 0x80) != 0)
-		attenuation = 1.0f - attenuation;
-	if (attenuation < 0.002f)
-		return 1.0f;
-	float attenuatedDuration = mSegEndTime - mSegStartTime;
-	float result = attenuatedDuration / attenuation;
-	if (result <= 0.00000011920929f)
-		result = 0.00000023841858f;
-	return result;
+/* ------------------------------------------------------------ Init ---- */
+void rvSegment::Init(rvBSE* effect,
+    rvDeclEffect* decl,
+    int templateHandle,
+    float timeNow)
+{
+    mFlags = 0;
+    mEffectDecl = decl;
+    mSegmentTemplateHandle = templateHandle;
+
+    const auto* st = decl->GetSegmentTemplate(templateHandle);
+    if (!st) return;
+
+    mLastTime = timeNow;
+    mActiveCount = 0;
+    mSecondsPerParticle = idVec2(0.0f, 0.0f);
+    mCount = idVec2(1.0f, 1.0f);
+    mSoundVolume = 0.0f;
+    mFreqShift = 1.0f;
+    mParticles = nullptr;
+
+    InitTime(effect, const_cast<rvSegmentTemplate*>(st), effect->mStartTime);
+    GetSecondsPerParticle(effect, const_cast<rvSegmentTemplate*>(st),
+        const_cast<rvParticleTemplate*>(&st->mParticleTemplate));
+    const_cast<rvSegmentTemplate*>(st)->mBSEEffect = effect;
 }
 
-float rvSegment::AttenuateInterval(rvBSE* effect, rvSegmentTemplate* st) {
-	float minInterval = (mSecondsPerParticle.y - mSecondsPerParticle.x) * 1.0f + mSecondsPerParticle.x;
-	if (mSecondsPerParticle.y <= minInterval) {
-		if (mSecondsPerParticle.x < minInterval)
-			minInterval = mSecondsPerParticle.x;
-	}
-	else {
-		minInterval = mSecondsPerParticle.y;
-	}
-	if ((st->mFlags & 0x40) == 0)
-		return minInterval;
-	float attenuation = effect->GetAttenuation(st);
-	if ((st->mFlags & 0x80) != 0)
-		attenuation = 1.0f - attenuation;
-	if (attenuation < 0.002f)
-		return 1.0f;
-	float attenuatedInterval = minInterval / attenuation;
-	float result = attenuatedInterval;
-	if (attenuatedInterval <= 0.00000011920929f)
-		result = 0.00000023841858f;
-	return result;
+/* --------------------------------------------------------- InsertParticle */
+void rvSegment::InsertParticle(rvParticle* p,
+    rvSegmentTemplate* st)
+{
+    if (st->mFlags & 0x100)                 // invisible?
+        return;
+
+    ++mActiveCount;
+
+    /* SRTF_SORTBYENDTIME flag? ---------------------------------------- */
+    if (st->mFlags & 0x200) {
+        p->mNext = mUsedHead;
+        mUsedHead = p;
+        return;
+    }
+
+    /* otherwise keep list sorted by EndTime --------------------------- */
+    rvParticle* prev = nullptr;
+    rvParticle* cur = mUsedHead;
+    while (cur && p->mEndTime > cur->mEndTime) {
+        prev = cur;
+        cur = cur->mNext;
+    }
+    p->mNext = cur;
+    if (prev) prev->mNext = p;
+    else        mUsedHead = p;
 }
 
-float rvSegment::AttenuateCount(rvBSE* effect, rvSegmentTemplate* st, float min, float max) {
-	float countRange = max - min;
-	float randomCount = rvRandom::flrand(min, min + countRange);
-	if (min <= randomCount) {
-		if (max < randomCount)
-			randomCount = max;
-	}
-	else {
-		randomCount = min;
-	}
-	if ((st->mFlags & 0x40) != 0) {
-		float attenuation = effect->GetAttenuation(st);
-		if ((st->mFlags & 0x80) != 0)
-			attenuation = 1.0f - attenuation;
-		randomCount *= attenuation;
-	}
-	return randomCount;
+/* ----------------------------------------------------------- SpawnParticle */
+rvParticle* rvSegment::SpawnParticle(rvBSE* effect,
+    rvSegmentTemplate* st,
+    float birthTime,
+    const idVec3* offset,
+    const idMat3* axis)
+{
+    rvParticle* p = nullptr;
+
+    if (st->mFlags & 0x100) {           // re-use internal array slot
+        p = mParticles;
+    }
+    else {
+        p = mFreeHead;
+        if (p) mFreeHead = p->mNext;
+    }
+    if (!p) return nullptr;
+
+    p->FinishSpawn(effect, this, birthTime, birthTime, *offset, *axis);
+    InsertParticle(p, st);
+    return p;
 }
 
-void rvSegment::RefreshParticles(rvBSE* effect, rvSegmentTemplate* st) {
-	if (st->mParticleTemplate.UsesEndOrigin()) {
-		rvParticle* particle = mUsedHead;
-		while (particle) {
-			rvParticle* nextParticle = particle->GetNext();
-			particle->Refresh(effect, st, &st->mParticleTemplate);
-			particle = nextParticle;
-		}
-	}
+/* ------------------------------------------------------ AttenuateDuration */
+float rvSegment::AttenuateDuration(rvBSE* effect,
+    rvSegmentTemplate* st)
+{
+    return effect->GetAttenuation(st) * (mSegEndTime - mSegStartTime);
 }
 
-void rvParticle::DoRenderBurnTrail(rvBSE* effect, rvParticleTemplate* pt, const idMat3& view, srfTriangles_t* tri, float time) {
-	int trailCount = mTrailCount;
-	if (trailCount) {
-		if (mTrailTime != 0.0) {
-			int delta = 1;
-			float deltaTime = mTrailTime / trailCount;
-			for (int i = 1; i <= trailCount; ++i) {
-				float trailTime = time - delta * deltaTime;
-				if (mStartTime <= trailTime && mEndTime > trailTime) {
-					float trailRatio = static_cast<float>(mTrailCount - i) / static_cast<float>(mTrailCount);
-					float interpolatedTime = trailTime;
-					Render(effect, pt, view, tri, interpolatedTime, trailRatio);
-				}
-				++delta;
-			}
-		}
-	}
+
+/* ---------------------------------------------------------------------------
+   ❶  Attenuation helpers
+   --------------------------------------------------------------------------- */
+float rvSegment::AttenuateInterval(rvBSE* effect,
+    rvSegmentTemplate* st)
+{
+    const float minRate = mSecondsPerParticle.x;
+    const float maxRate = mSecondsPerParticle.y;
+
+    float rate = idMath::Lerp(maxRate, minRate, bse_scale.GetFloat());
+    rate = Clamp(rate, maxRate, minRate);
+
+    if (!(st->mFlags & 0x40))
+        return rate;                                 // no attenuation flag
+
+    float att = effect->GetAttenuation(st);
+    if (st->mFlags & 0x80)
+        att = 1.0f - att;                            // invert?
+
+    return (att >= kMinSpawnRate) ? rate / att     // avoid div-0
+        : 1.0f;
 }
 
-void rvSegment::RenderMotion(rvBSE* effect, const renderEffect_s* owner, idRenderModel* model, rvParticleTemplate* pt, float time) {
-	const modelSurface_t* surface = model->Surface(mSurfaceIndex + 1);
-	srfTriangles_t* triangles = surface->geometry;
-	rvParticle* particle = mUsedHead;
-	while (particle) {
-		particle->RenderMotion(effect, pt, triangles, owner, time, pt->GetTrailScale());
-		particle = particle->GetNext();
-	}
-	R_BoundTriSurf(triangles);
+const rvSegmentTemplate* rvSegment::GetSegmentTemplate() const
+{
+    return mEffectDecl->GetSegmentTemplate(this->mSegmentTemplateHandle);
 }
 
-rvParticle* rvSegment::SpawnParticle(rvBSE* effect, rvSegmentTemplate* st, float birthTime, const idVec3& initOffset, const idMat3& initAxis) {
-	rvParticle* particle = nullptr;
-	if ((mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle)->mFlags & 0x100) != 0)
-		particle = mParticles;
-	else {
-		if (mFreeHead) {
-			rvParticle* nextParticle = mUsedHead;
-			mFreeHead->SetNext(nextParticle);
-			mUsedHead = mFreeHead;
-			mFreeHead = mFreeHead->GetNext();
-			particle = mUsedHead;
-		}
-	}
-	if (particle)
-		particle->FinishSpawn(effect, this, birthTime, birthTime - effect->GetStartTime(), initOffset, initAxis);
-	return particle;
+float rvSegment::AttenuateCount(rvBSE* effect,
+    rvSegmentTemplate* st,
+    float min, float max)
+{
+    const float scaledMax = idMath::Lerp(min, max, bse_scale.GetFloat());
+    float count = rvRandom::flrand(min, scaledMax);
+    count = Clamp(count, min, max);
+
+    if (!(st->mFlags & 0x40))
+        return count;
+
+    float att = effect->GetAttenuation(st);
+    if (st->mFlags & 0x80)
+        att = 1.0f - att;
+
+    return att * count;
 }
 
-void rvSegment::SpawnParticles(rvBSE* effect, rvSegmentTemplate* st, float birthTime, int count) {
-	int totalCount = count;
-	while (totalCount > 0) {
-		if ((mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle)->mFlags & 0x100) == 0) {
-			if (mFreeHead) {
-				rvParticle* nextParticle = mUsedHead;
-				mFreeHead->SetNext(nextParticle);
-				mUsedHead = mFreeHead;
-				mFreeHead = mFreeHead->GetNext();
-				float countRatio = static_cast<float>(mLoopParticleCount - totalCount) / static_cast<float>(mLoopParticleCount - 1);
-				mUsedHead->FinishSpawn(effect, this, birthTime, countRatio, vec3_origin, mat3_identity);
-			}
-		}
-		else {
-			rvParticle* nextParticle = mParticles;
-			float countRatio = static_cast<float>(mLoopParticleCount - totalCount) / static_cast<float>(mLoopParticleCount - 1);
-			mParticles->FinishSpawn(effect, this, birthTime, countRatio, vec3_origin, mat3_identity);
-		}
-		--totalCount;
-	}
+/* ---------------------------------------------------------------------------
+   ❷  Simple per-frame particle list maintenance
+   --------------------------------------------------------------------------- */
+void rvSegment::UpdateSimpleParticles(float timeNow)
+{
+    while (mUsedHead &&
+        mUsedHead->mEndTime - kMinSpawnRate <= timeNow)
+    {
+        rvParticle* dead = mUsedHead;
+        mUsedHead = dead->mNext;
+
+        dead->mNext = mFreeHead;
+        mFreeHead = dead;
+        --mActiveCount;
+    }
 }
 
-void rvSegment::PlayEffect(rvBSE* effect, rvSegmentTemplate* st, float time) {
-	//if (mEffectDecl->IsSpawnTimeValid(time)) {
-		int count = static_cast<int>(AttenuateCount(effect, st, st->mCount.x, st->mCount.y));
-		if (count > 0) {
-			SpawnParticles(effect, st, time, count);
-		}
-	//}
+void rvSegment::UpdateElectricityParticles(float timeNow)
+{
+    mActiveCount = 0;
+    for (rvParticle* p = mUsedHead; p; p = p->mNext) {
+        mActiveCount += p->Update(timeNow);
+    }
 }
 
-bool rvSegment::UpdateParticles(rvBSE* effect, float time) {
-	bool result = false;
-	if (mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle)->mFlags & 0x100) {
-		rvParticle* particle = mParticles;
-		while (particle) {
-			rvParticle* nextParticle = particle->GetNext();
-			result |= particle->Update((rvParticleTemplate *)effect, time);
-			particle = nextParticle;
-		}
-	}
-	else {
-		rvParticle* particle = mUsedHead;
-		while (particle) {
-			rvParticle* nextParticle = particle->GetNext();
-			if (particle->Update((rvParticleTemplate*)effect, time)) {
-				particle->SetNext(mFreeHead);
-				mFreeHead = particle;
-			}
-			else {
-				result = true;
-			}
-			particle = nextParticle;
-		}
-	}
-	return result;
+void rvSegment::RefreshParticles(rvBSE* effect,
+    rvSegmentTemplate* st)
+{
+    if (!rvParticleTemplate::UsesEndOrigin(&st->mParticleTemplate))
+        return;
+
+    for (rvParticle* p = mUsedHead; p; p = p->mNext) {
+        p->Refresh(effect, st, &st->mParticleTemplate);
+    }
 }
 
-bool rvSegment::Active() {
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
-	if (segmentTemplate && (segmentTemplate->mFlags & 4) && mActiveCount)
-		return segmentTemplate->mFlags & 1;
-	return false;
+/* ---------------------------------------------------------------------------
+   ❸  Generic physics + lifetime handling
+   --------------------------------------------------------------------------- */
+void rvSegment::UpdateGenericParticles(rvBSE* effect,
+    rvSegmentTemplate* st,
+    float timeNow)
+{
+    const bool smoker = rvSegmentTemplate::GetSmoker(st);
+    const bool looping = (st->mFlags & 0x20) != 0;
+
+    rvParticle* prev = nullptr;
+    rvParticle* cur = mUsedHead;
+
+    while (cur) {
+        rvParticle* next = cur->mNext;
+        bool kill = false;
+
+        if (looping) {
+            cur->RunPhysics(effect, st, timeNow);
+            if (effect->mFlags & 8)
+                kill = true;
+        }
+        else {
+            if (cur->mEndTime - kMinSpawnRate <= timeNow) {
+                cur->CheckTimeoutEffect(effect, st, timeNow);
+                kill = true;
+            }
+            else {
+                kill = cur->RunPhysics(effect, st, timeNow);
+            }
+        }
+
+        if ((effect->mFlags & 8) && !(cur->mFlags & 0x200000))
+            kill = true;
+
+        if (smoker && st->mTrailSegmentIndex >= 0)
+            cur->EmitSmokeParticles(
+                effect,
+                &effect->mSegments.list[st->mTrailSegmentIndex],
+                timeNow);
+
+        if (kill) {
+            if (prev) prev->mNext = next;
+            else        mUsedHead = next;
+
+            cur->Destroy();
+            cur->mNext = mFreeHead;
+            mFreeHead = cur;
+            --mActiveCount;
+        }
+        else {
+            prev = cur;
+        }
+        cur = next;
+    }
 }
 
-void rvSegment::AllocateSurface(rvBSE* effect, idRenderModel* model) {
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
-	if (segmentTemplate && (segmentTemplate->mFlags & 4)) {
-		rvParticleTemplate* particleTemplate = &segmentTemplate->mParticleTemplate;
-		int particleCount = effect->GetLooping() ? mLoopParticleCount : mParticleCount;
-		srfTriangles_t* triangles = model->AllocSurfaceTriangles(particleCount * particleTemplate->GetVertexCount(), particleCount * particleTemplate->GetIndexCount());
+/* ---------------------------------------------------------------------------
+   ❹  Segment-type-specific handling & updates
+   --------------------------------------------------------------------------- */
+void rvSegment::PlayEffect(rvBSE* effect,
+    rvSegmentTemplate* st)
+{
+    const int idx =
+        rvRandom::irand(0, st->mNumEffects - 1);
 
-		modelSurface_t surf;
-		surf.id = 0;
-		surf.geometry = triangles;
-		surf.shader = particleTemplate->GetMaterial();
-		model->AddSurface(surf);
-
-		mSurfaceIndex = model->NumSurfaces() - 1;
-
-		if (particleTemplate->GetTrailType() == 2 && (particleTemplate->GetMaxTrailCount() || particleTemplate->GetMaxTrailTime() >= 0.0020000001)) {
-			int trailCount = particleTemplate->GetMaxTrailCount();
-			srfTriangles_t* trailTriangles = model->AllocSurfaceTriangles(2 * particleCount * trailCount + 2, 12 * particleCount * trailCount);
-
-			modelSurface_t trailSurf;
-			trailSurf.id = 0;
-			trailSurf.geometry = trailTriangles;
-			trailSurf.shader = particleTemplate->GetTrailMaterial();
-			model->AddSurface(trailSurf);
-
-			mFlags |= 4u;
-		}
-	}
+    game->PlayEffect(
+        st->mEffects[idx],
+        effect->mCurrentOrigin,
+        effect->mCurrentAxis,
+        /*joint*/ 0,
+        vec3_origin,
+        /*surfId*/ 0,
+        EC_IGNORE,
+        vec4_one);
 }
 
-void rvSegment::ClearSurface(rvBSE* effect, idRenderModel* model) {
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
-	if (segmentTemplate && (segmentTemplate->mFlags & 4) != 0) {
-		const modelSurface_t* surface = model->Surface(mSurfaceIndex);
-		if (segmentTemplate->mParticleTemplate.GetType() == 7) {
-			model->FreeSurfaceTriangles(surface->geometry);
-			int count = effect->GetLooping() ? mLoopParticleCount : mParticleCount;
-			int totalCount = count * mActiveCount;
-			int vertexCount = totalCount * segmentTemplate->mParticleTemplate.GetVertexCount();
-			int indexCount = totalCount * segmentTemplate->mParticleTemplate.GetIndexCount();
-			if (vertexCount > 10000) vertexCount = 10000;
-			if (indexCount > 30000) indexCount = 30000;
-			srfTriangles_t* triangles = model->AllocSurfaceTriangles(vertexCount, indexCount);
-			// triangles->texCoordScale = 100.0;
-			if ((mFlags & 4) != 0) {
-				modelSurface_t* trailSurface = (modelSurface_t*)model->Surface(mSurfaceIndex + 1);
-				model->FreeSurfaceTriangles(trailSurface->geometry);
-				int trailVertexCount = 2 * totalCount + 2;
-				int trailIndexCount = 12 * totalCount;
-				if (trailVertexCount > 10000) trailVertexCount = 10000;
-				if (trailIndexCount > 30000) trailIndexCount = 30000;
-				trailSurface->geometry = model->AllocSurfaceTriangles(trailVertexCount, trailIndexCount);
-				// trailSurface->geometry->texCoordScale = 100.0;
-			}
-		}
-		else {
-			srfTriangles_t* geometry = surface->geometry;
-			geometry->numIndexes = 0;
-			geometry->numVerts = 0;
-			if ((mFlags & 4) != 0) {
-				srfTriangles_t* trailGeometry = model->Surface(mSurfaceIndex + 1)->geometry;
-				trailGeometry->numIndexes = 0;
-				trailGeometry->numVerts = 0;
-			}
-		}
-	}
+void rvSegment::Handle(rvBSE* effect,
+    rvSegmentTemplate* st,
+    float timeNow)
+{
+    switch (st->mSegType) {
+    case 2:      // continous
+    case 3:      // burst
+        if (effect->mFlags & 4)
+            RefreshParticles(effect, st);
+        break;
+
+    case 5:      // sound
+        rvBSE::UpdateSoundEmitter(effect, st, this);
+        break;
+
+    case 7:      // light
+        if (st->mFlags & 1)
+            HandleLight(effect, st, timeNow);   // existing engine fn
+        break;
+
+    default:    /* nothing */ break;
+    }
 }
 
-void rvSegment::RenderTrail(rvBSE* effect, const renderEffect_s* owner, idRenderModel* model, float time) {
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
-	if (segmentTemplate) {
-		rvParticleTemplate* particleTemplate = &segmentTemplate->mParticleTemplate;
-		float maxTrailTime = particleTemplate->GetMaxTrailTime();
-		if (maxTrailTime >= 0.0020000001 && particleTemplate->GetTrailType() == 2)
-			rvSegment::RenderMotion(effect, owner, model, particleTemplate, time);
-	}
+void rvSegment::Handle(rvBSE* effect, float timeNow)
+{
+    auto* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+    if (!st || timeNow < mSegStartTime)
+        return;
+
+    Handle(effect, st, timeNow);
 }
 
-void rvSegment::Init(rvBSE* effect, const rvDeclEffect* effectDecl, int segmentTemplateHandle, float time) {
-	mSegmentTemplateHandle = segmentTemplateHandle;
-	mFlags = 0;
-	mEffectDecl = effectDecl;
-	mParticleType = effectDecl->GetSegmentTemplate(segmentTemplateHandle)->mParticleTemplate.GetType();
-	mSurfaceIndex = -1;
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)effectDecl->GetSegmentTemplate(segmentTemplateHandle);
-	if (segmentTemplate) {
-		mActiveCount = 0;
-		mLastTime = time;
-		// Additional initialization code if needed
-	}
+/* ---------------------------------------------------------------------------
+   ❺  Per-frame UpdateParticles entry
+   --------------------------------------------------------------------------- */
+bool rvSegment::UpdateParticles(rvBSE* effect, float timeNow)
+{
+    auto* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+    if (!st) return false;
+
+    Handle(effect, timeNow);
+
+    const bool forceGeneric =
+        (effect->mFlags & 8) || (st->mFlags & 0x200);
+
+    if (forceGeneric)
+        UpdateGenericParticles(effect, st, timeNow);
+    else
+        UpdateSimpleParticles(timeNow);
+
+    if (st->mParticleTemplate.mType == 7)
+        UpdateElectricityParticles(timeNow);
+
+    /* debug HUD stats -------------------------------------------------- */
+    if (com_debugHudActive) {
+        dword_1137DDB0 += mActiveCount;
+        if (mUsedHead)
+            dword_1137DDB4 +=
+            rvSegmentTemplate::GetTexelCount(st);
+    }
+    return mUsedHead != nullptr;
 }
 
-void rvSegment::AddToParticleCount(rvBSE* effect, int count, int loopCount, float duration) {
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
-	if (segmentTemplate) {
-		if (duration < (double)segmentTemplate->mParticleTemplate.GetMaxDuration())
-			duration = segmentTemplate->mParticleTemplate.GetMaxDuration();
-		float durationa = duration + 0.01600000075995922;
-		float durationb = durationa / this->mSecondsPerParticle.y;
-		int durationc = (int)ceil(durationb);
-		int totalCount = (durationc + 1) * (loopCount + count);
-		if (effect->GetLooping()) {
-			if (totalCount > 2048) {
-				common->Warning("More than MAX_PARTICLES required for segment %s\n", segmentTemplate->GetSegmentName().c_str());
-				totalCount = 2048;
-			}
-			this->mLoopParticleCount = totalCount;
-		}
-		else {
-			if (totalCount > 2048) {
-				common->Warning("More than MAX_PARTICLES required for segment %s\n", segmentTemplate->GetSegmentName().c_str());
-				totalCount = 2048;
-			}
-			this->mParticleCount = totalCount;
-		}
-	}
+/* ---------------------------------------------------------------------------
+   ❻  Rendering helpers
+   --------------------------------------------------------------------------- */
+void rvSegment::RenderMotion(rvBSE* effect,
+    const renderEffect_s* owner,
+    rvRenderModelBSE* model,
+    rvParticleTemplate* pt,
+    float timeNow)
+{
+    const int segments = mActiveCount *
+        (static_cast<int>(ceilf(pt->mTrailCount.y)) + 1);
+
+    srfTriangles_s* tri = R_AllocStaticTriSurf();
+    R_AllocStaticTriSurfVerts(tri, 2 * segments + 2);
+    R_AllocStaticTriSurfIndexes(tri, 12 * segments);
+
+    const idMaterial* mat = pt->mTrailMaterial;
+
+    for (rvParticle* p = mUsedHead; p; p = p->mNext)
+        p->RenderMotion(effect, tri, owner, timeNow);
+
+    R_BoundTriSurf(tri);
+    model->AddSurface( /*id*/0, mat, tri, 0);
 }
 
-void rvSegment::CalcTrailCounts(rvBSE* effect, rvSegmentTemplate* st, rvParticleTemplate* pt, float duration) {
-	if (st->mTrailSegmentIndex >= 0) {
-		effect->GetTrailSegment(st->mTrailSegmentIndex)->AddToParticleCount(effect, mParticleCount, mLoopParticleCount, duration);
-	}
+void rvSegment::RenderTrail(rvBSE* effect,
+    const renderEffect_s* owner,
+    rvRenderModelBSE* model,
+    float timeNow)
+{
+    auto* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+    if (!st) return;
+
+    auto* pt = &st->mParticleTemplate;
+    if (ceilf(pt->mTrailCount.y) < 0 ||
+        pt->mTrailTime.y < kMinSpawnRate ||
+        pt->mTrailType != 2)
+        return;
+
+    RenderMotion(effect, owner, model, pt, timeNow);
 }
 
-void rvSegment::CalcCounts(rvBSE* effect, float time) {
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
-	if (segmentTemplate) {
-		float effectMinDuration = segmentTemplate->GetParticleTemplate()->GetMaxDuration() + 0.01600000075995922;
-		float pt = mEffectDecl->GetMinDuration();
-		float duration = segmentTemplate->mLocalDuration.y;
-		int segType = segmentTemplate->mSegType;
-		int count = 0;
-		int loopCount = 0;
-		switch (segType) {
-		case SEG_EMITTER:
-			if (segmentTemplate->mParticleTemplate.GetType() == 10) {
-				count = loopCount = 1;
-			}
-			else {
-				float durationPlus = duration < (double)effectMinDuration ? segmentTemplate->GetParticleTemplate()->GetMaxDuration() + 0.01600000075995922 : duration + 0.01600000075995922;
-				float durationDiv = durationPlus / this->mSecondsPerParticle.y;
-				int durationCeil = (int)ceilf(durationDiv);
-				count = loopCount = durationCeil + 1;
-				if (effectMinDuration > (double)pt) {
-					loopCount = (int)ceilf(effectMinDuration * (durationCeil + 1) / pt) + 1;
-				}
-			}
-			break;
-		case SEG_SPAWNER:
-			if (segmentTemplate->mParticleTemplate.GetType() == 10) {
-				count = loopCount = 1;
-			}
-			else {
-				count = loopCount = (int)ceilf(this->mCount.y);
-				if (pt != 0.0 && !(segmentTemplate->mFlags & 0x20) && effectMinDuration > pt) {
-					loopCount *= ((int)ceilf(effectMinDuration / pt) + 1);
-					loopCount++;
-				}
-			}
-			break;
-		default:
-			break;
-		}
-		if (effect->GetLooping() && loopCount > 2048) {
-			common->Warning("More than MAX_PARTICLES required for segment %s\n", segmentTemplate->GetSegmentName().c_str());
-			loopCount = 2048;
-		}
-		if (!effect->GetLooping() && count > 2048) {
-			common->Warning("More than MAX_PARTICLES required for segment %s\n", segmentTemplate->GetSegmentName().c_str());
-			count = 2048;
-		}
-		mParticleCount = count;
-		mLoopParticleCount = loopCount;
-		if ((segmentTemplate->mFlags & 4) && (count == 0 || loopCount == 0)) {
-			common->Warning("Segment with no particles for effect %s\n", mEffectDecl->base->GetName());
-			int segType = segmentTemplate->mSegType;
-			if (segType == SEG_EMITTER || segType == SEG_SPAWNER) {
-				CalcTrailCounts(effect, segmentTemplate, &segmentTemplate->mParticleTemplate, duration);
-			}
-		}
-		if (!effect->GetLooping()) {
-			float effecta = mSegEndTime - time + segmentTemplate->mParticleTemplate.GetMaxDuration();
-			effect->SetDuration(effecta);
-		}
-	}
+void rvSegment::Render(rvBSE* effect,
+    const renderEffect_s* owner,
+    rvRenderModelBSE* model,
+    float timeNow)
+{
+    auto* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+    if (!st) return;
+
+    const size_t bytesNeeded =
+        (mActiveCount * st->mParticleTemplate.mVertexCount) * sizeof(idDrawVert);
+
+    if (bytesNeeded > 1 * 1024 * 1024) {     // >1 MiB safety
+        common->Warning("^4BSE:^1 '%s'\nMore than a MiB of vertex data",
+            rvBSE::GetDeclName(effect));
+        return;
+    }
+
+    srfTriangles_s* tri = R_AllocStaticTriSurf();
+    R_AllocStaticTriSurfVerts(tri, mActiveCount * st->mParticleTemplate.mVertexCount);
+    R_AllocStaticTriSurfIndexes(tri, mActiveCount * st->mParticleTemplate.mIndexCount);
+    tri->shader = st->mParticleTemplate.mMaterial;
+
+    /* build view-aligned axes once per call --------------------------- */
+    idMat3 viewAxis;
+    idMat3 modelMat;
+    R_AxisToModelMatrix(&owner->axis, &owner->origin, modelMat.ToFloatPtr());
+    R_GlobalVectorToLocal(modelMat.ToFloatPtr(), &effect->mViewAxis[1], &viewAxis[1]);
+    R_GlobalVectorToLocal(modelMat.ToFloatPtr(), &effect->mViewAxis[2], &viewAxis[2]);
+    idVec3 toEye = effect->mViewOrg - owner->origin;
+    viewAxis[0].x = toEye * owner->axis[0];
+    viewAxis[0].y = toEye * owner->axis[1];
+    viewAxis[0].z = toEye * owner->axis[2];
+
+    /* draw each particle --------------------------------------------- */
+    for (rvParticle* p = mUsedHead; p; p = p->mNext) {
+        if (st->mFlags & 0x20)
+            p->mEndTime = timeNow + 1.0f;
+
+        if (p->Render(effect, &viewAxis, tri, timeNow) &&
+            st->mParticleTemplate.mTrailType == 1)
+        {
+            p->RenderBurnTrail(effect, &viewAxis, tri, timeNow);
+        }
+    }
+
+    R_BoundTriSurf(tri);
+    model->AddSurface( /*id*/0, tri->shader, tri, 0);
 }
 
-void rvSegment::ResetTime(rvBSE* effect, float time) {
-	rvSegmentTemplate* segmentTemplate = (rvSegmentTemplate*)mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
-	if (segmentTemplate && !(segmentTemplate->mFlags & 0x20)) {
-		InitTime(effect, segmentTemplate, time);
-	}
+/* ---------------------------------------------------------------------------
+   ❼  Book-keeping / queries
+   --------------------------------------------------------------------------- */
+float rvSegment::EvaluateCost() const
+{
+    const auto* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+    if (!st || !(st->mFlags & 1))
+        return 0.0f;
+
+    const int  segType = st->mSegType;
+    float cost = s_segmentBaseCost[segType];
+
+    if (st->mParticleTemplate.mType) {
+        cost += rvParticleTemplate::CostTrail(&st->mParticleTemplate,
+            static_cast<float>(mActiveCount));
+        if (st->mParticleTemplate.mFlags & 0x200)
+            cost += mActiveCount * 80.0f;
+    }
+    return cost;
 }
 
-rvParticle* rvSegment::InitParticleArray(rvBSE* effect) {
-	int particleCount = effect->GetLooping() ? mLoopParticleCount : mParticleCount;
-	int type = mEffectDecl->GetSegmentTemplate(mSegmentTemplateHandle)->mParticleTemplate.GetType();
-	rvParticle* particle = nullptr;
-	rvParticle* prevParticle = nullptr;
-	for (int i = 0; i < particleCount - 1; i++) {
-		switch (type) {
-		case PTYPE_LINE:        particle = new rvLineParticle(); break;
-		case PTYPE_ORIENTED:    particle = new rvOrientedParticle(); break;
-		case PTYPE_DECAL:       particle = new rvDecalParticle(); break;
-		case PTYPE_MODEL:       particle = new rvModelParticle(); break;
-		case PTYPE_LIGHT:       particle = new rvLightParticle(); break;
-		case PTYPE_ELECTRICITY: particle = new rvElectricityParticle(); break;
-		case PTYPE_LINKED:      particle = new rvLinkedParticle(); break;
-		//case PTYPE_ORIENTEDLINKED: particle = new sdOrientedLinkedParticle(); break;
-		case PTYPE_DEBRIS:      particle = new rvDebrisParticle(); break;
-		default:                particle = new rvSpriteParticle(); break;
-		}
-		if (i > 0) {
-			prevParticle->SetNext(particle);
-		}
-		if (i == 0) {
-			mFreeHead = particle;
-		}
-		prevParticle = particle;
-	}
-	if (particleCount > 0) {
-		prevParticle->SetNext(nullptr);
-	}
-	mUsedHead = nullptr;
-	return mFreeHead;
+bool rvSegment::Active() const
+{
+    const auto* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+
+    return st && (st->mFlags & 4) && mActiveCount;
 }
 
-void rvSegment::Sort(const idVec3& eyePos) {
-	// This used smooth sort to sort the particles from the eye position.
-	// Needs eval.
+bool rvSegment::GetLocked() const
+{
+    const auto* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+    return st ? (st->mFlags & 2) != 0 : false;
+}
+
+/* ---------------------------------------------------------------------------
+   ❽  Particle array allocation
+   --------------------------------------------------------------------------- */
+rvParticle* rvSegment::InitParticleArray(rvBSE* effect)
+{
+    /* decide how many -------------------------------------------------- */
+    const auto* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+    if (!st) return nullptr;
+
+    const int requested =
+        (effect->mFlags & 1) ? mLoopParticleCount : mParticleCount;
+
+    const int maxAllowed = bse_maxParticles.GetInteger();
+    int count = idMath::ClampInt(0, maxAllowed, requested);
+
+    if (requested > maxAllowed) {
+        common->Warning("^4BSE:^1 '%s'\nMore than %d particles required (%d)",
+            rvBSE::GetDeclName(effect),
+            maxAllowed, requested);
+    }
+
+    if (count == 0) return nullptr;
+
+    /* size / ctor table ------------------------------------------------ */
+    struct Table { intptr_t type, bytes, ctor, dtor; } tbl[] = {
+        { 2, 416, (intptr_t)&rvLineParticle::rvLineParticle,
+                    (intptr_t)&rvLineParticle::~rvLineParticle },
+        { 3, 456, (intptr_t)&rvOrientedParticle::rvOrientedParticle,
+                    (intptr_t)&rvOrientedParticle::~rvLineParticle },
+        { 4, 400, (intptr_t)&rvDecalParticle::rvDecalParticle,
+                    (intptr_t)&rvLineParticle::~rvLineParticle },
+        { 5, 456, (intptr_t)&rvModelParticle::rvModelParticle,
+                    (intptr_t)&rvLineParticle::~rvLineParticle },
+        { 6, 616, (intptr_t)&rvLightParticle::rvLightParticle,
+                    (intptr_t)&rvLightParticle::~rvLightParticle },
+        { 7, 476, (intptr_t)&rvElectricityParticle::rvElectricityParticle,
+                    (intptr_t)&rvLineParticle::~rvLineParticle },
+        { 8, 360, (intptr_t)&rvLinkedParticle::rvLinkedParticle,
+                    (intptr_t)&rvLineParticle::~rvLineParticle },
+        { 9, 396, (intptr_t)&rvDebrisParticle::rvDebrisParticle,
+                    (intptr_t)&rvLineParticle::~rvLineParticle },
+        { -1,400, (intptr_t)&rvSpriteParticle::rvSpriteParticle,
+                    (intptr_t)&rvLineParticle::~rvLineParticle }
+    };
+
+    const int pType = st->mParticleTemplate.mType;
+    const Table* row = nullptr;
+    for (const auto& r : tbl)
+        if (r.type == pType || r.type == -1) { row = &r; break; }
+
+    byte* mem = (byte*)Memory::Allocate(row->bytes * count + 4);
+    if (!mem) return nullptr;
+
+    *reinterpret_cast<int*>(mem) = count;          // store length
+    byte* base = mem + 4;
+
+    /* construct array in place ---------------------------------------- */
+    for (int i = 0; i < count; ++i) {
+        rvParticle* p = reinterpret_cast<rvParticle*>(base + i * row->bytes);
+        ((void(__thiscall*)(rvParticle*)) row->ctor)(p);
+        if (i < count - 1)
+            p->mNext = reinterpret_cast<rvParticle*>(base + (i + 1) * row->bytes);
+        else
+            p->mNext = nullptr;
+    }
+
+    return reinterpret_cast<rvParticle*>(base);
 }
 
 void rvSegment::InitParticles(rvBSE* effect)
 {
-	if (mEffectDecl->GetSegmentTemplate(this->mSegmentTemplateHandle))
-	{
-		mParticles = (rvParticle*)InitParticleArray(effect);
-		mActiveCount = 0;
-	}
+    if (rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle)) {
+        mParticles = InitParticleArray(effect);
+        mUsedHead = nullptr;
+        mFreeHead = mParticles;
+        mActiveCount = 0;
+    }
 }
 
-void rvSegment::Render(rvBSE* effect, const renderEffect_s* owner, idRenderModel* model, float time) {
-	const rvDeclEffect* effectDecl = mEffectDecl;
-	rvSegmentTemplate* segmentTemplate = nullptr;
-	rvParticleTemplate* particleTemplate = nullptr;
-
-	if (effectDecl) {
-		segmentTemplate = (rvSegmentTemplate * )effectDecl->GetSegmentTemplate(mSegmentTemplateHandle);
-		if (segmentTemplate) {
-			particleTemplate = (rvParticleTemplate*) & segmentTemplate->mParticleTemplate;
-
-			const modelSurface_t* surface = model->Surface(mSurfaceIndex);
-			srfTriangles_t* triangles = surface->geometry;
-			int startVerts = triangles->numVerts;
-			int startIndexes = triangles->numIndexes;
-
-			idMat3 view;
-			float modelMatrix[16];
-
-			R_AxisToModelMatrix(owner->axis, owner->origin, modelMatrix);
-			R_GlobalVectorToLocal(modelMatrix, effect->GetViewAxis()[1], view[1]);
-			R_GlobalVectorToLocal(modelMatrix, effect->GetViewAxis()[2], view[2]);
-
-			float offsetX = effect->GetViewOrg().x - owner->origin.x;
-			float offsetY = effect->GetViewOrg().y - owner->origin.y;
-			float offsetZ = effect->GetViewOrg().z - owner->origin.z;
-
-			float axis20 = owner->axis[2].z;
-			float axis10 = owner->axis[1].z;
-			float axis21 = owner->axis[2].y;
-			float axis11 = owner->axis[1].y;
-			float axis02 = owner->axis[2].x;
-			float axis01 = owner->axis[0].y;
-
-			float viewX = owner->axis[0].x * offsetX + offsetY * axis01 + offsetZ * owner->axis[0].z;
-			float viewY = offsetY * axis11 + owner->axis[1].x * offsetX + offsetZ * axis10;
-			float viewZ = offsetZ * axis20 + offsetX * axis02 + offsetY * axis21;
-
-			view[0].x = viewX;
-			view[0].y = viewY;
-			view[0].z = viewZ;
-
-			int numAllocedVerts = std::min(9500, triangles->numVerts);
-			int numAllocedIndices = std::min(29500, triangles->numIndexes);
-
-			rvParticle* currentParticle = mUsedHead;
-			int numRenderedParticles = 0;
-
-			while (currentParticle) {
-				if ((segmentTemplate->mFlags & 0x20) != 0) {
-					currentParticle->mEndTime = time + 1.0;
-				}
-
-				if (triangles->numVerts + particleTemplate->GetVertexCount() > numAllocedVerts ||
-					triangles->numIndexes + particleTemplate->GetIndexCount() > numAllocedIndices) {
-					break;
-				}
-
-				if (!segmentTemplate->GetInverseDrawOrder()) {
-					numRenderedParticles++;
-					float currentRenderTime = time;
-					if (currentParticle->Render(effect, particleTemplate, view, triangles, currentRenderTime, 1.0f) &&
-						particleTemplate->GetTrailType() == 1) {
-						currentParticle->RenderBurnTrail(effect, particleTemplate, view, triangles, time);
-					}
-				}
-
-				currentParticle = currentParticle->mNext;
-			}
-
-			if (triangles->numVerts > mActiveCount * particleTemplate->GetVertexCount()) {
-				common->Printf("rvSegment::Render - tri->numVerts > pt->GetVertexCount() * mActiveCount ( [%d %d] [%d %d] [%d %d] [%d %d %d] )",
-					startVerts,
-					startIndexes,
-					triangles->numVerts,
-					triangles->numIndexes,
-					numRenderedParticles,
-					mActiveCount,
-					particleTemplate->GetIndexCount(),
-					particleTemplate->GetVertexCount(),
-					segmentTemplate->GetInverseDrawOrder());
-			}
-
-			if (triangles->numIndexes > mActiveCount * particleTemplate->GetIndexCount()) {
-				common->Printf("rvSegment::Render - tri->numIndexes > pt->GetIndexCount() * mActiveCount ( [%d %d] [%d %d] [%d %d] [%d %d %d] )",
-					startVerts,
-					startIndexes,
-					triangles->numVerts,
-					triangles->numIndexes,
-					numRenderedParticles,
-					mActiveCount,
-					particleTemplate->GetIndexCount(),
-					particleTemplate->GetVertexCount(),
-					segmentTemplate->GetInverseDrawOrder());
-			}
-
-			R_BoundTriSurf(triangles);
-		}
-	}
+ID_INLINE static bool BSE_DecalDebug() {
+    return bse_debug.GetBool();
 }
 
-bool rvSegment::HandleLight(rvBSE* effect, rvSegmentTemplate* st, float time) {
-	// Check if there are any used particles in the segment
-	if (!this->mUsedHead) {
-		return false; // Early exit if no particles are being used
-	}
+void rvSegment::CreateDecal(rvBSE* effect, float timeNow)
+{
+    if (!bse_render.GetBool())
+        return;
 
-	// Present the light effect for the used particle
-	this->mUsedHead->PresentLight(effect, &st->mParticleTemplate, time, (st->mFlags >> 5) & ~0x1);
+    rvSegmentTemplate* st =
+        rvDeclEffect::GetSegmentTemplate(mEffectDecl, mSegmentTemplateHandle);
+    if (!st) return;
 
-	// Check if the light handling flag is set in the segment template's flags
-	if ((st->mFlags >> 5) & 1) {
-		return false; // Skip further processing if the flag is set
-	}
+    /* only once ------------------------------------------------------- */
+    if (mFlags & 1)
+        return;
 
-	// Calculate adjusted time for the light effect
-	float adjustedTime = this->mUsedHead->mStartTime - 0.002f;
-	if (adjustedTime > time) {
-		return false; // Skip if the adjusted start time is greater than the current time
-	}
+    /* -------------------------------------------------------------- dbg */
+    if (BSE_DecalDebug()) {
+        common->Printf("BSE: Decal from segment %d (%s)\n",
+            mSegmentTemplateHandle,
+            st->mParticleTemplate.mMaterial ?
+            st->mParticleTemplate.mMaterial->GetName() :
+            "<no material>");
+    }
 
-	// Move the used particle to the free list
-	this->mFreeHead = this->mUsedHead;
-	this->mUsedHead = nullptr; // Clear the used list
+    /* ------------------------------------------------------ parameters */
+    idVec3  origin = effect->mCurrentOrigin;
+    idMat3  axis = effect->mCurrentAxis;
 
-	return true; // Indicate that light handling was successful
+    idVec3  size;      // filled by template callback
+    idVec3  rotation;  // Euler (deg)
+    idVec4  tint;      // RGBA 0-1
+
+    st->DispatchDecalParms(tint, size, rotation); /* ← wrapper around
+                                                       script callbacks in
+                                                       original code */
+
+                                                       /* --------------------------------------------------- build quad    */
+    const float hw = size.x * 0.5f;
+    const float hh = size.y * 0.5f;
+
+    /* local-space corners (XY plane) */
+    idVec3 local[4] = {
+        idVec3(hw,  hh, 0),
+        idVec3(-hw,  hh, 0),
+        idVec3(-hw, -hh, 0),
+        idVec3(hw, -hh, 0)
+    };
+
+    /* apply Z-rotation (only rotation.z mattered in original) */
+    const float ang = DEG2RAD(rotation.z);
+    const float c = idMath::Cos(ang);
+    const float s = idMath::Sin(ang);
+
+    for (auto& v : local) {
+        const float x = v.x * c - v.y * s;
+        const float y = v.x * s + v.y * c;
+        v.x = x; v.y = y;
+        v = origin + v * axis;             // to world
+    }
+
+    /* ------------------------------------------------ winding & decal */
+    idFixedWinding w;
+    w.Resize(4);
+    for (int i = 0; i < 4; ++i)
+        w.p[i] = local[i];
+
+    /* thickness == size.z, direction == axis[2] (model “forward”) */
+    const idVec3 projectionDir = axis[2];
+    const idVec3 projectionOrg = origin - projectionDir * size.z * 0.5f;
+    const float  projectionDepth = size.z;
+
+    session->rw->ProjectDecalOntoWorld(
+        &w,
+        projectionOrg,
+        projectionDir,
+        projectionDepth,
+        st->mParticleTemplate.mMaterial,
+        tint);
+
+    /* ---------------------------------------- mark done so it won’t
+       repeat; also tick effect duration if this segment dictates it. */
+    mFlags |= 1;
+    if (!(st->mFlags & 0x20))
+        rvBSE::SetDuration(effect,
+            (mSegEndTime - timeNow) + st->mParticleTemplate.mDuration.y);
 }

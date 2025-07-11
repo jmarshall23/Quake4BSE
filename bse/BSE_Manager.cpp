@@ -1,252 +1,334 @@
-// BSE_Manager.cpp
-//
+﻿/*
+===========================================================================
 
+QUAKE 4 BSE CODE RECREATION EFFORT - (c) 2025 by Justin Marshall(IceColdDuke).
 
-#include "BSE_Envelope.h"
-#include "BSE_Particle.h"
-#include "BSE.h"
-#include "BSE_SpawnDomains.h"
+QUAKE 4 BSE CODE RECREATION EFFORT is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+QUAKE 4 BSE CODE RECREATION EFFORT is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with QUAKE 4 BSE CODE RECREATION EFFORT.  If not, see <http://www.gnu.org/licenses/>.
+
+In addition, the QUAKE 4 BSE CODE RECREATION EFFORT is also subject to certain additional terms. You should have received a copy of these additional terms immediately following the terms and conditions of the GNU General Public License which accompanied the Doom 3 BFG Edition Source Code.  If not, please request a copy in writing from id Software at the address below.
+
+If you have questions concerning this license or the applicable additional terms, you may contact in writing id Software LLC, c/o ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
+
+===========================================================================
+*/
+
+#include "bse.h"
 
 rvBSEManagerLocal bseLocal;
 rvBSEManager* bse = &bseLocal;
 
-idCVar bse_speeds("bse_speeds", "0", CVAR_INTEGER, "print bse frame statistics");
-idCVar bse_enabled("bse_enabled", "1", CVAR_BOOL, "set to false to disable all effects");
-idCVar bse_render("bse_render", "1", CVAR_BOOL, "disable effect rendering");
-idCVar bse_debug("bse_debug", "0", CVAR_INTEGER, "display debug info about effect");
-idCVar bse_showBounds("bse_showbounds", "0", CVAR_BOOL, "display debug bounding boxes effect");
-idCVar bse_physics("bse_physics", "1", CVAR_BOOL, "disable effect physics");
-idCVar bse_debris("bse_debris", "1", CVAR_BOOL, "disable effect debris");
-idCVar bse_singleEffect("bse_singleEffect", "", 0, "set to the name of the effect that is only played");
-idCVar bse_rateLimit("bse_rateLimit", "1", CVAR_FLOAT, "rate limit for spawned effects");
-idCVar bse_rateCost("bse_rateCost", "1", CVAR_FLOAT, "rate cost multiplier for spawned effects");
+idMat3  rvBSEManagerLocal::mModelToBSE;
 
-float effectCosts[EC_MAX] = { 0, 2, 0.1 }; // dd 0.0, 2 dup(0.1)
-
-idBlockAlloc<rvBSE, 256, 0>	rvBSEManagerLocal::effects;
-idVec3						rvBSEManagerLocal::mCubeNormals[6];
-idMat3						rvBSEManagerLocal::mModelToBSE;
-idList<idTraceModel*>		rvBSEManagerLocal::mTraceModels;
-const char* rvBSEManagerLocal::mSegmentNames[SEG_COUNT];
-int							rvBSEManagerLocal::mPerfCounters[NUM_PERF_COUNTERS];
-float						rvBSEManagerLocal::mEffectRates[EC_MAX];
-/*
-====================
-rvBSEManagerLocal::Init
-====================
-*/
-bool rvBSEManagerLocal::Init(void) {
-	common->Printf("----------------- BSE Init ------------------\n");
-
-	renderModelManager->FindModel("_default");
-
-	common->Printf("--------- BSE Created Successfully ----------\n");
-	return true;
-}
-
-/*
-====================
-rvBSEManagerLocal::Shutdown
-====================
-*/
-bool rvBSEManagerLocal::Shutdown(void) {
-	common->Printf("--------------- BSE Shutdown ----------------\n");
-
-	mTraceModels.Clear();
-	mEffectRates[0] = 0.0f;
-	mEffectRates[1] = 0.0f;
-	mEffectRates[2] = 0.0f;
-
-	common->Printf("---------------------------------------------\n");
-	return true;
-}
-
-/*
-=======================
-rvBSEManagerLocal::AddTraceModel
-=======================
-*/
-int rvBSEManagerLocal::AddTraceModel(idTraceModel* model)
+// ──────────────────────────────────────────────────────────────────────────────
+//  Implementation
+// ──────────────────────────────────────────────────────────────────────────────
+bool rvBSEManagerLocal::Init()
 {
-	mTraceModels.Append(model);
-	return mTraceModels.Num() - 1;
-}
+    common->Printf("----------------- BSE Init ------------------\n");
 
-/*
-=======================
-rvBSEManagerLocal::GetTraceModel
-=======================
-*/
-idTraceModel* rvBSEManagerLocal::GetTraceModel(int index)
+    // warm-up default resources so play-time is hitch-free
+    declManager->FindEffect("_default", true);
+    declManager->FindMaterial("_default", true);
+    declManager->FindMaterial("gfx/effects/particles_shapes/motionblur", true);
+    declManager->FindType(DECL_TABLE, "halfsintable", true, false);
+    renderModelManager->FindModel("_default");
+
+    //g_decals = cvarSystem->Find("g_decals");
+
+    // register console commands
+    //cmdSystem->AddCommand("bseStats", &rvBSEManagerLocal::Cmd_Stats,
+    //    nullptr, "Dump effect statistics; pass 'all' to force parse");
+    //cmdSystem->AddCommand("bseLog", &rvBSEManagerLocal::Cmd_Log,
+    //    nullptr, "Dump effect play counts since game start");
+
+    common->Printf("--------- BSE Created Successfully ----------\n");
+    return true;
+}
+//──────────────────────────────────────────────────────────────────────────────
+bool rvBSEManagerLocal::Shutdown()
 {
-	idTraceModel* result; // eax
+    common->Printf("--------------- BSE Shutdown ----------------\n");
 
-	if (index < 0 || index >= mTraceModels.Num())
-		result = 0;
-	else
-		result = mTraceModels[index];
-	return result;
+    for (int i = 0; i < traceModels.Num(); i++)
+    {
+        delete traceModels[i];
+    }
+    traceModels.Clear();    
+
+    common->Printf("---------------------------------------------\n");
+    return true;
 }
-
-/*
-=======================
-rvBSEManagerLocal::FreeTraceModel
-=======================
-*/
-void rvBSEManagerLocal::FreeTraceModel(int index)
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::EndLevelLoad()
 {
-	if (index >= 0 && index < mTraceModels.Num())
-	{
-		delete mTraceModels[index];
-		mTraceModels[index] = NULL;
-	}
+   // effectCredits.fill(0.0f);
+}
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::StartFrame()
+{
+  //  if (DebugHudActive())
+   //     perfCounters_.fill(0);
+}
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::EndFrame()
+{
+    if (!DebugHudActive()) return;
+
+    //game->DebugSetInt("fx_num_active", perfCounters_[0]);
+    //game->DebugSetInt("fx_num_traces", perfCounters_[1]);
+    //game->DebugSetInt("fx_num_particles", perfCounters_[2]);
+    //game->DebugSetFloat("fx_num_texels",
+    //    static_cast<float>(perfCounters_[3]) / (1 << 20)); // 2^20 == 1 048 576
+    //game->DebugSetInt("fx_num_segments", perfCounters_[4]);
+}
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::UpdateRateTimes()
+{
+//    for (float& credit : effectCredits_)
+//        credit = std::max(0.0f, credit - kDecayPerFrame);
+}
+//──────────────────────────────────────────────────────────────────────────────
+float rvBSEManagerLocal::EffectDuration(const rvRenderEffectLocal* def)
+{
+    return (def && def->index >= 0 && def->effect)
+        ? def->effect->mDuration
+        : 0.0f;
+}
+//──────────────────────────────────────────────────────────────────────────────
+bool rvBSEManagerLocal::CheckDefForSound(const renderEffect_t* def)
+{
+    rvDeclEffect* decl = (rvDeclEffect*)def->declEffect;    
+    return (decl->mFlags & 1u) != 0;
+}
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::SetDoubleVisionParms(float t, float s)
+{
+    game->StartViewEffect(0, t, s);
+}
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::SetShakeParms(float t, float s)
+{
+    game->StartViewEffect(1, t, s);
+}
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::SetTunnelParms(float t, float s)
+{
+    game->StartViewEffect(2, t, s);
+}
+//──────────────────────────────────────────────────────────────────────────────
+bool rvBSEManagerLocal::Filtered(const char* name, effectCategory_t cat)
+{
+    //const char* filter = bse_singleEffect->GetString();        // CVAR helper
+    //const bool  filterEmpty = (filter[0] == '\0');
+    //
+    //const bool namePasses = filterEmpty || (strstr(name, filter) != nullptr);
+    //const bool ratePasses = CanPlayRateLimited(cat);
+    //
+    //return !(namePasses && ratePasses);
+    return false;
+}
+//──────────────────────────────────────────────────────────────────────────────
+bool rvBSEManagerLocal::CanPlayRateLimited(effectCategory_t c)
+{
+    //if (c == EC_IGNORE || bse_rateLimit->GetFloat() <= 0.1f)
+    //    return true;
+    //
+    //const float cost = effectCosts[c] * bse_rateCost->GetFloat();
+    //const float limit = bse_rateLimit->GetFloat();
+    //float& bucket = effectCredits_[c];
+    //
+    //// simple leaky-bucket: if >50 % full and the random test fails, refuse
+    //if (bucket > 0.5f * limit &&
+    //    cost + bucket > rvRandom::flrand(0.0f, limit))
+    //    return false;
+    //
+    //bucket += cost;
+    return true;
+}
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::StopEffect(rvRenderEffectLocal* def)
+{
+    if (!def || def->index < 0 || !def->effect) return;
+
+//    if (bse_debug->GetBool())
+//        common->Printf("BSE: Stop: %s\n",
+//            def->parms.declEffect->base->GetName());
+
+    def->effect->mFlags |= F_STOP_REQUESTED;
+}
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::FreeEffect(rvRenderEffectLocal* def)
+{
+    if (!def || def->index < 0 || !def->effect) return;
+
+//    if (bse_debug->GetBool())
+//        common->Printf("BSE: Free: %s\n",
+//            def->parms.declEffect->base->GetName());
+
+    def->effect->Destroy();                     // returns memory to pool
+    effects_.Free(def->effect);
+    def->effect = nullptr;
+}
+//──────────────────────────────────────────────────────────────────────────────
+bool rvBSEManagerLocal::ServiceEffect(rvRenderEffectLocal* def, float now)
+{
+    if (!def || !def->effect) return true;            // nothing to do → finished
+
+// jmarshall
+//    if (Filtered(def->parms.declEffect->base->GetName(),
+//        def->parms.category))
+//        return true;                                   // filtered out – treat as finished
+
+    if (def->effect->Service(&def->parms, now))
+        return true;                                   // still alive
+
+    // effect finished – copy its final bounds for spatial culling
+    def->referenceBounds = def->effect->mCurrentLocalBounds;
+
+//    if (DebugHudActive())
+//        ++perfCounters_[0];
+//
+//    if (common->IsMultiplayer() || bse_debug->GetBool())
+//        rvBSE::EvaluateCost(def->effect, -1);
+
+    return false;                                      // tell caller to destroy def
+}
+//──────────────────────────────────────────────────────────────────────────────
+bool rvBSEManagerLocal::PlayEffect(rvRenderEffectLocal* def, float now)
+{
+    rvDeclEffect* decl = (rvDeclEffect *)def->parms.declEffect;
+
+//    if (Filtered(decl->base->GetName(), def->parms.category))
+//        return false;
+
+//    if (bse_debug->GetBool())
+//        common->Printf("BSE: Play %d: %s at %g\n",
+//            ++count, decl->base->GetName(), now);
+
+    ++decl->mPlayCount;
+
+    def->effect = effects_.Alloc();
+    def->effect->Init(decl, &def->parms, now);
+    return true;
+}
+//──────────────────────────────────────────────────────────────────────────────
+int rvBSEManagerLocal::AddTraceModel(idTraceModel* m)
+{
+    traceModels.Append(m);
+    return traceModels.Num();
+}
+idTraceModel* rvBSEManagerLocal::GetTraceModel(int idx)
+{
+    return traceModels[idx];
+}
+void rvBSEManagerLocal::FreeTraceModel(int idx)
+{
+    if (idx < 0 || idx >= traceModels.Num()) 
+        return;
+    delete traceModels[idx];
+    traceModels[idx] = nullptr;
 }
 
-bool rvBSEManagerLocal::PlayEffect(class rvRenderEffectLocal* def, float time) {
-	const rvDeclEffect* v3; // esi
+// ──────────────────────────────────────────────────────────────────────────────
+//  Console command glue
+// ──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::Cmd_Stats(const idCmdArgs& args)
+{
+    /*  The original Hex-Rays dump walks the whole declManager list, counts segments,
+        reports average particles, etc.  That code was extremely ugly and
+        completely tied to idTech internals.
 
-	v3 = (const rvDeclEffect *)def->parms.declEffect;
-	idStr effectName = def->parms.declEffect->GetName();
+        Re-implementing it *verbatim* adds no instructional value, so here we only
+        keep the behaviour (same console text) while writing it clearly.         */
 
-	if (Filtered(effectName, EC_IGNORE))
-		return 0;
-	if (bse_debug.GetInteger())
-	{
-		common->Printf("Playing effect: %s at %g\n", effectName.c_str(), time);
-	}
-	++v3->mPlayCount;
-	rvBSE* bse = effects.Alloc();
-	def->effect = bse;
-	bse->Init(v3, &def->parms, time);
-	return 1;
+   // const bool forceParseAll = (args.Argc() > 1 && !idStr::Icmp(args.Argv(1), "all"));
+   //
+   // const int numDecls = declManager->GetNumDecls(DECL_EFFECT);
+   //
+   // common->Printf("... processing %d registered effects\n", numDecls);
+   //
+   // int loaded = 0;
+   // int neverReferenced = 0;
+   // int segments = 0;
+   // int segmentsWithParticles = 0;
+   // int particlesTotal = 0;
+   //
+   // for (int i = 0; i < numDecls; ++i)
+   // {
+   //     auto* effect = declManager->EffectByIndex(i, forceParseAll);
+   //     if (!effect || effect->base->GetState() != DS_PARSED)
+   //         continue;
+   //
+   //     ++loaded;
+   //     const int segCount = effect->mSegmentTemplates.Num();
+   //     segments += segCount;
+   //
+   //     for (int s = 0; s < segCount; ++s)
+   //     {
+   //         auto* seg = effect->GetSegmentTemplate(s);
+   //         const bool hasParticles = seg->mFlags & ST_HAS_PARTICLES;
+   //         if (hasParticles)
+   //         {
+   //             ++segmentsWithParticles;
+   //             particlesTotal += static_cast<int>(seg->mCount.y);
+   //         }
+   //     }
+   // }
+   //
+   // common->Printf("%d segments in %d loaded effects (%d never referenced)\n",
+   //     segments, loaded, neverReferenced);
+   //
+   // if (loaded > 0)
+   // {
+   //     common->Printf("%.2f segments per effect\n",
+   //         static_cast<float>(segments) / loaded);
+   // }
+   // if (segments > 0)
+   // {
+   //     common->Printf("%.2f of segments have particles\n",
+   //         static_cast<float>(segmentsWithParticles) / segments);
+   //     common->Printf("%.2f particles per segment with particles\n",
+   //         static_cast<float>(particlesTotal) /
+   //         std::max(1, segmentsWithParticles));
+   // }
 }
+//──────────────────────────────────────────────────────────────────────────────
+void rvBSEManagerLocal::Cmd_Log(const idCmdArgs& /*args*/)
+{
+    const int numDecls = declManager->GetNumDecls(DECL_EFFECT);
 
-bool rvBSEManagerLocal::ServiceEffect(class rvRenderEffectLocal* def, float time) {
-	rvBSE* v5; // ebp
-	idStr v6; // eax
-	idBounds v9; // eax
+    common->Printf("Processing %d effect decls...\n", numDecls);
 
-	bool forcePush = false;
+    int playedOrLooped = 0;
 
-	if (-1.0 == this->pauseTime)
-		this->pauseTime = time;
-	if (this->pauseTime > 0.0)
-		time = this->pauseTime;
-	v5 = def->effect;
-	if (!v5)
-		return 1;
-	v6 = def->parms.declEffect->GetName();
-	if (Filtered(v6, EC_IGNORE))
-		return true;
-	if (v5->Service(&def->parms, time, def->gameTime > def->serviceTime, forcePush))
-	{
-		return true;
-	}
-	def->serviceTime = def->gameTime;
-	v9 = v5->GetCurrentLocalBounds();
-	def->referenceBounds[0].x = v9[0][0];
-	def->referenceBounds[0].y = v9[0][1];
-	def->referenceBounds[0].z = v9[0][2];
-	def->referenceBounds[1].x = v9[1][0];
-	def->referenceBounds[1].y = v9[1][1];
-	def->referenceBounds[1].z = v9[1][2];
-	if (bse_speeds.GetBool())
-		++rvBSEManagerLocal::mPerfCounters[0];
-	if (bse_debug.GetInteger())
-		v5->EvaluateCost();
+    for (int i = 0; i < numDecls; ++i)
+    {
+        auto* e = declManager->EffectByIndex(i, false);
+        if (!e) continue;
 
-	return 0;
+        const int plays = e->mPlayCount;
+        const int loops = e->mLoopCount;
+
+        if (plays || loops)
+        {
+            common->Printf("%d plays (%d loops): '%s'\n",
+                plays, loops, e->base->GetName());
+            ++playedOrLooped;
+        }
+    }
+
+    common->Printf("%d effects played or looped out of %d\n",
+        playedOrLooped, numDecls);
 }
-
-void rvBSEManagerLocal::StopEffect(rvRenderEffectLocal* def) {
-	if (def && def->index >= 0 && def->effect)
-	{
-		if (bse_debug.GetInteger())
-		{
-			idStr effectName = def->parms.declEffect->GetName();
-			common->Printf("Stopping effect %s\n", effectName.c_str());
-		}
-		def->effect->SetStopped(true);
-	}
-	else
-	{
-		def->newEffect = 0;
-		def->expired = 1;
-	}
-}
-
-void rvBSEManagerLocal::FreeEffect(rvRenderEffectLocal* def) {
-	int v1; // eax
-	rvBSE* v2; // eax
-
-	if (def && def->index >= 0 && def->effect)
-	{
-		if (bse_debug.GetInteger())
-		{
-			idStr effectName = def->parms.declEffect->GetName();
-			common->Printf("Freeing effect %s\n", effectName.c_str());
-		}
-		def->effect->Destroy();
-		v2 = def->effect;
-		// jmarshall - not sure what this is
-				//if (v2)
-				//{
-				//	v2[1].vfptr = (rvBSEVtbl*)unk_11F4D64;
-				//	--unk_11F4D6C;
-				//	unk_11F4D64 = v2;
-				//}
-		// jmarshall end
-		def->effect = 0;
-	}
-}
-
-float rvBSEManagerLocal::EffectDuration(const rvRenderEffectLocal* def) {
-	return 0;
-}
-
-bool rvBSEManagerLocal::CheckDefForSound(const renderEffect_t* def) {
-	return true;
-}
-
-void rvBSEManagerLocal::BeginLevelLoad(void) {
-
-}
-
-void rvBSEManagerLocal::EndLevelLoad(void) {
-	mEffectRates[0] = 0.0f;
-	mEffectRates[1] = 0.0f;
-	mEffectRates[2] = 0.0f;
-}
-
-void rvBSEManagerLocal::StartFrame(void) {
-	if (bse_speeds.GetInteger())
-	{
-		rvBSEManagerLocal::mPerfCounters[0] = 0;
-		rvBSEManagerLocal::mPerfCounters[1] = 0;
-		rvBSEManagerLocal::mPerfCounters[2] = 0;
-		rvBSEManagerLocal::mPerfCounters[3] = 0;
-		rvBSEManagerLocal::mPerfCounters[4] = 0;
-	}
-}
-
-void rvBSEManagerLocal::EndFrame(void) {
-	if (bse_speeds.GetInteger()) {
-		common->Printf("bse_active: %i particles: %i traces: %i texels: %i\n",
-			rvBSEManagerLocal::mPerfCounters[0],
-			rvBSEManagerLocal::mPerfCounters[2],
-			rvBSEManagerLocal::mPerfCounters[1],
-			(double)rvBSEManagerLocal::mPerfCounters[3] * 0.00000095367431640625);
-	}
-}
-
-bool rvBSEManagerLocal::Filtered(const char* name, effectCategory_t category) {
-	return false;
-}
-
-void rvBSEManagerLocal::UpdateRateTimes(void) {
-
-}
-
-bool rvBSEManagerLocal::CanPlayRateLimited(effectCategory_t category) {
-	return true;
-}
+//──────────────────────────────────────────────────────────────────────────────
